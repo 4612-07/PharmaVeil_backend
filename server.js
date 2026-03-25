@@ -258,8 +258,9 @@ Réponds UNIQUEMENT avec :
 //  4. SERVICE NLP — Extraction Claude
 // ═══════════════════════════════════════════════════════════════════
 
-const anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const CONF_GREEN  = parseFloat(process.env.CONFIDENCE_THRESHOLD_GREEN  || '0.85');
+function getAnthropicClient() {
+  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+}const CONF_GREEN  = parseFloat(process.env.CONFIDENCE_THRESHOLD_GREEN  || '0.85');
 const CONF_ORANGE = parseFloat(process.env.CONFIDENCE_THRESHOLD_ORANGE || '0.60');
 
 function _parseJson(raw) {
@@ -289,7 +290,7 @@ async function extractIcsrData(sourceText, sourceType) {
   if (!sourceText || sourceText.trim().length < 20)
     throw new Error('Texte source trop court (< 20 caractères)');
 
-  const response = await anthropicClient.messages.create({
+  function getAnthropicClient(){ return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); }
     model: 'claude-sonnet-4-6', max_tokens: 2000,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserPrompt(sourceText, sourceType) }],
@@ -337,7 +338,7 @@ async function checkDuplicate(extracted, recentCases) {
   if (!recentCases?.length)
     return { isDuplicate: false, duplicateCaseId: null, confidence: 0, reason: 'Aucun cas récent' };
   try {
-    const res = await anthropicClient.messages.create({
+    function getAnthropicClient(){ return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); }
       model: 'claude-sonnet-4-6', max_tokens: 300,
       messages: [{ role: 'user', content: buildDuplicatePrompt(extracted, recentCases) }],
     });
