@@ -627,8 +627,8 @@ const PORT = process.env.PORT || 3001;
 app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-    ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu']
-    : '*',
+  ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app']
+  : '*',
 }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '10mb' }));
