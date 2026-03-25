@@ -291,7 +291,7 @@ async function extractIcsrData(sourceText, sourceType) {
     throw new Error('Texte source trop court (< 20 caractères)');
 
   function getAnthropicClient(){ return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); }
-    model: 'claude-sonnet-4-6', max_tokens: 2000,
+    const response = await getAnthropicClient().messages.create({model: 'claude-sonnet-4-6', max_tokens: 2000,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserPrompt(sourceText, sourceType) }],
   });
