@@ -290,8 +290,8 @@ async function extractIcsrData(sourceText, sourceType) {
   if (!sourceText || sourceText.trim().length < 20)
     throw new Error('Texte source trop court (< 20 caractères)');
 
-  function getAnthropicClient(){ return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); }
-    const response = await getAnthropicClient().messages.create({model: 'claude-sonnet-4-6', max_tokens: 2000,
+  const response = await getAnthropicClient().messages.create({
+    model: 'claude-sonnet-4-6', max_tokens: 2000,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserPrompt(sourceText, sourceType) }],
   });
@@ -338,7 +338,7 @@ async function checkDuplicate(extracted, recentCases) {
   if (!recentCases?.length)
     return { isDuplicate: false, duplicateCaseId: null, confidence: 0, reason: 'Aucun cas récent' };
   try {
-    function getAnthropicClient(){ return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); }
+    const res = await getAnthropicClient().messages.create({
       model: 'claude-sonnet-4-6', max_tokens: 300,
       messages: [{ role: 'user', content: buildDuplicatePrompt(extracted, recentCases) }],
     });
