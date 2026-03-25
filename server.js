@@ -38,7 +38,7 @@ const cors      = require('cors');
 const helmet    = require('helmet');
 const morgan    = require('morgan');
 const multer    = require('multer');
-const pdfParse  = require('pdf-parse/lib/pdf-parse.js');
+let pdfParse = null;
 const PDFDoc    = require('pdfkit');
 const { v4: uuidv4 } = require('uuid');
 const { z }     = require('zod');
@@ -731,6 +731,7 @@ app.post('/api/cases/intake/pdf', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Fichier PDF requis (champ: file)' });
     let pdfText;
+    if (!pdfParse) pdfParse = require('pdf-parse');
     try { const d = await pdfParse(req.file.buffer); pdfText = d.text; }
     catch { return res.status(422).json({ error: 'PDF illisible ou protégé' }); }
     if (!pdfText?.trim() || pdfText.trim().length < 30)
