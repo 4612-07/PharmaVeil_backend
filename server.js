@@ -628,7 +628,7 @@ const PORT = process.env.PORT || 3001;
 app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-  app.post('/api/cases/intake/pdf', cors(), upload.single('file'), async (req, res) => {
+  ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app', 'https://aquamarine-chaja-6f97f3.netlify.app']
   : '*',
   methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
@@ -636,7 +636,6 @@ app.use(cors({
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE_MB || '10') * 1024 * 1024 },
@@ -738,6 +737,7 @@ app.post('/api/cases/intake/pdf', cors(), upload.single('file'), async (req, res
     catch { return res.status(422).json({ error: 'PDF illisible ou protégé' }); }
     if (!pdfText?.trim() || pdfText.trim().length < 30)
       return res.status(422).json({ error: 'PDF vide ou non-textuel' });
+
     req.body = { source_type: 'manual', manual_text: pdfText, org_id: req.body?.org_id };
     return app._router.handle(req, res, () => {});
   } catch (err) { return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
