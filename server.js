@@ -627,8 +627,8 @@ const PORT = process.env.PORT || 3001;
 
 app.use(helmet());
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' ?
- ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app', 'https://aquamarine-chaja-6f97f3.netlify.app']
+  origin: process.env.NODE_ENV === 'production'
+  ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app', 'https://aquamarine-chaja-6f97f3.netlify.app']
   : '*',
   methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
