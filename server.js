@@ -727,7 +727,7 @@ app.post('/api/cases/intake', async (req, res) => {
 });
 
 // ─── POST /api/cases/intake/pdf ───────────────────────────────────────────────
-
+app.options('/api/cases/intake/pdf', cors());
 app.post('/api/cases/intake/pdf', cors(), upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Fichier PDF requis (champ: file)' });
