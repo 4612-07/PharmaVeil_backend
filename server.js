@@ -918,6 +918,9 @@ app.use((req, res) =>
 
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.stack);
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (err.code === 'LIMIT_FILE_SIZE')
     return res.status(413).json({ error: 'Fichier trop volumineux' });
   res.status(500).json({ error: 'Erreur interne', details: process.env.NODE_ENV==='development' ? err.message : undefined });
