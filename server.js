@@ -732,7 +732,7 @@ app.post('/api/cases/intake/pdf', cors(), upload.single('file'), async (req, res
   try {
     if (!req.file) return res.status(400).json({ error: 'Fichier PDF requis (champ: file)' });
     let pdfText;
-    if (!pdfParse) pdfParse = require('pdf-parse/lib/pdf-parse.js');
+    if (!pdfParse) { process.env.PDFJS_DISABLE_WORKER = '1'; pdfParse = require('pdf-parse'); }
     try { const d = await pdfParse(req.file.buffer); pdfText = d.text; }
     catch { return res.status(422).json({ error: 'PDF illisible ou protégé' }); }
     if (!pdfText?.trim() || pdfText.trim().length < 30)
