@@ -739,7 +739,9 @@ app.post('/api/cases/intake/pdf', cors(), upload.single('file'), async (req, res
       return res.status(422).json({ error: 'PDF vide ou non-textuel' });
 
     req.body = { source_type: 'manual', manual_text: pdfText, org_id: req.body?.org_id };
-    return app._router.handle(req, res, () => {});
+    req.url = '/api/cases/intake';
+req.method = 'POST';
+return app(req, res);
   } catch (err) { console.error('[PDF-INTAKE]', err.message, err.stack); return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
 });
 
