@@ -740,7 +740,7 @@ app.post('/api/cases/intake/pdf', cors(), upload.single('file'), async (req, res
 
     req.body = { source_type: 'manual', manual_text: pdfText, org_id: req.body?.org_id };
     return app._router.handle(req, res, () => {});
-  } catch (err) { return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
+  } catch (err) { console.error('[PDF-INTAKE]', err.message, err.stack); return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
 });
 
 // ─── GET /api/cases ───────────────────────────────────────────────────────────
