@@ -83,6 +83,8 @@ function _initSchema(db) {
       received_at TEXT NOT NULL,
       deadline_7 TEXT, deadline_15 TEXT, deadline_90 TEXT,
       seriousness TEXT,
+      report_type TEXT NOT NULL DEFAULT 'spontaneous',
+      reporter_qualification TEXT,
       duplicate_flag INTEGER DEFAULT 0,
       processed_at TEXT, validated_at TEXT, validated_by TEXT
     );
@@ -452,6 +454,85 @@ const AUTHORITY_RULES = {
     notes: 'Post-Brexit — soumission indépendante de EudraVigilance depuis 2021',
   },
 };
+
+// ─── Règles GVP par type de rapport ─────────────────────────────────────────
+
+const REPORT_TYPES = {
+  spontaneous: {
+    label: 'Spontané',
+    description: 'Signalement spontané (médecin, pharmacien, patient, infirmière)',
+    reporters: ['physician','pharmacist','patient','nurse','other_hcp','consumer'],
+    deadline_serious_fatal: 7,
+    deadline_serious: 15,
+    deadline_non_serious: 90,
+    requires: ['patient','reporter','drug','adr'],
+    gvp_module: 'GVP Module VI',
+    susar: false,
+  },
+  literature: {
+    label: 'Littérature',
+    description: "Cas issu d'une publication scientifique ou abstract",
+    reporters: ['author','journal'],
+    deadline_serious_fatal: 15,
+    deadline_serious: 15,
+    deadline_non_serious: 90,
+    requires: ['drug','adr','reference'],
+    gvp_module: 'GVP Module VI — Section VI.C.2',
+    susar: false,
+    extra_fields: ['reference_author','reference_journal','reference_year','reference_doi'],
+  },
+  clinical_study: {
+    label: 'Étude clinique (SUSAR)',
+    description: 'Suspected Unexpected Serious Adverse Reaction en essai clinique',
+    reporters: ['investigator','sponsor','cro'],
+    deadline_serious_fatal: 7,
+    deadline_serious: 7,
+    deadline_non_serious: 15,
+    requires: ['patient','reporter','drug','adr','study_number','protocol'],
+    gvp_module: 'GVP Module VI + ICH E2A',
+    susar: true,
+    extra_fields: ['study_number','protocol_number','investigator_name','sponsor_name'],
+  },
+  post_market: {
+    label: 'Post-Market (PASS/PAES)',
+    description: "Étude post-autorisation de sécurité ou d'efficacité",
+    reporters: ['investigator','physician'],
+    deadline_serious_fatal: 7,
+    deadline_serious: 15,
+    deadline_non_serious: 90,
+    requires: ['patient','reporter','drug','adr','study_number'],
+    gvp_module: 'GVP Module VIII',
+    susar: false,
+    extra_fields: ['study_number','pass_paes_type'],
+  },
+  revised: {
+    label: 'Cas révisé',
+    description: "Mise à jour d'un cas déjà soumis (follow-up report)",
+    reporters: ['physician','pharmacist','patient','other_hcp'],
+    deadline_serious_fatal: 7,
+    deadline_serious: 15,
+    deadline_non_serious: 90,
+    requires: ['patient','reporter','drug','adr','original_case_id'],
+    gvp_module: 'GVP Module VI — Follow-up',
+    susar: false,
+    extra_fields: ['original_case_id','revision_reason'],
+  },
+  compassionate: {
+    label: 'Usage compassionnel / ATU',
+    description: "Autorisation Temporaire d'Utilisation ou compassionate use",
+    reporters: ['physician'],
+    deadline_serious_fatal: 7,
+    deadline_serious: 15,
+    deadline_non_serious: 90,
+    requires: ['patient','reporter','drug','adr'],
+    gvp_module: 'GVP Module VI + réglementation nationale',
+    susar: false,
+  },
+};
+
+function getReportTypeRules(reportType) {
+  return REPORT_TYPES[reportType] || REPORT_TYPES.spontaneous;
+}
 
 function getAuthorityRules(authorityCode) {
   return AUTHORITY_RULES[authorityCode?.toUpperCase()] || AUTHORITY_RULES.EMA;
@@ -897,9 +978,10 @@ async function generateCiomsIPdf(caseData) {
 
 async function dbInsertCase(data) {
   const db = await getDb();
-  db.run(`INSERT INTO icsr_cases (id,org_id,status,source_type,raw_content,received_at,deadline_7,deadline_15,deadline_90,seriousness,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+  db.run(`INSERT INTO icsr_cases (id,org_id,status,source_type,raw_content,received_at,deadline_7,deadline_15,deadline_90,seriousness,report_type,reporter_qualification,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [data.id, data.orgId||'default', data.status, data.sourceType, (data.rawContent||'').substring(0,50000),
-     data.receivedAt||new Date().toISOString(), data.deadline7||null, data.deadline15||null, data.deadline90||null, data.seriousness||null, new Date().toISOString()]);
+     data.receivedAt||new Date().toISOString(), data.deadline7||null, data.deadline15||null, data.deadline90||null, data.seriousness||null,
+     data.reportType||'spontaneous', data.reporterQualification||null, new Date().toISOString()]);
   _saveDb();
 }
 
@@ -1005,6 +1087,22 @@ app.get('/health', (req, res) =>
   res.json({ status:'ok', service:'PharmaVeil API', version:'1.1.0', timestamp: new Date().toISOString() })
 );
 
+// ─── GET /api/report-types ───────────────────────────────────────────────────
+
+app.get('/api/report-types', (req, res) => {
+  const list = Object.entries(REPORT_TYPES).map(([code, r]) => ({
+    code,
+    label: r.label,
+    description: r.description,
+    deadline_serious: r.deadline_serious,
+    deadline_fatal: r.deadline_serious_fatal,
+    is_susar: r.susar,
+    gvp_module: r.gvp_module,
+    extra_fields: r.extra_fields || [],
+  }));
+  return res.json({ report_types: list, total: list.length });
+});
+
 // ─── GET /api/authorities ─────────────────────────────────────────────────────
 
 app.get('/api/authorities', (req, res) => {
@@ -1075,6 +1173,8 @@ app.post('/api/cases/intake', async (req, res) => {
     if (!rawContent) return res.status(400).json({ error: `Champ requis manquant pour source_type=${source_type}` });
 
     const orgId  = req.body.org_id || 'default';
+    const reportType = req.body.report_type || 'spontaneous';
+    const reporterQualification = req.body.reporter_qualification || null;
     const normalized = normalizeSource(rawContent, source_type);
     const cv = validateSource(normalized);
     if (!cv.valid) return res.status(422).json({ error: cv.reason });
@@ -1090,6 +1190,8 @@ app.post('/api/cases/intake', async (req, res) => {
       deadline15: deadlines.deadline15?.toISOString() || null,
       deadline90: deadlines.deadline90?.toISOString() || null,
       seriousness: extracted.seriousness,
+      reportType,
+      reporterQualification,
     });
     await dbInsertFields({ id: crypto.randomUUID(), caseId, ...extracted });
     await dbInsertAlerts(caseId, deadlines);
@@ -1113,6 +1215,8 @@ app.post('/api/cases/intake', async (req, res) => {
 
     return res.status(201).json({
       case_id: caseId, status: 'pending_validation',
+      report_type: reportType,
+      reporter_qualification: reporterQualification,
       processing_ms: Date.now() - t0,
       validation_payload: {
         fields: {
