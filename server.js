@@ -344,6 +344,176 @@ function _calcDeadlines(isSerious, criteria = []) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  4c. RÈGLES DE SOUMISSION PAR AUTORITÉ (F9)
+// ═══════════════════════════════════════════════════════════════════
+
+const AUTHORITY_RULES = {
+  EMA: {
+    name: 'European Medicines Agency',
+    region: 'Europe',
+    portal: 'EudraVigilance',
+    deadlines: { fatal: 7, life_threatening: 7, serious: 15, non_serious: 90 },
+    validity_rules: {
+      patient_required: true,        // Patient identifiable obligatoire
+      reporter_required: true,       // Rapporteur identifiable obligatoire
+      drug_required: true,
+      adr_required: true,
+      anonymous_patient_valid: false, // Patient anonyme = cas INVALIDE
+      consumer_report_valid: true,
+    },
+    submission_format: 'E2B(R3)',
+    language: 'any',
+    notes: 'GVP Module VI — patient non identifiable = cas invalide',
+  },
+  ANSM: {
+    name: 'Agence Nationale de Sécurité du Médicament',
+    region: 'France',
+    portal: 'EudraVigilance (via MAH)',
+    deadlines: { fatal: 7, life_threatening: 7, serious: 15, non_serious: 90 },
+    validity_rules: {
+      patient_required: true,
+      reporter_required: true,
+      drug_required: true,
+      adr_required: true,
+      anonymous_patient_valid: false,
+      consumer_report_valid: true,
+    },
+    submission_format: 'E2B(R3)',
+    language: 'fr',
+    notes: 'Aligne sur EMA GVP — soumission via EudraVigilance',
+  },
+  FDA: {
+    name: 'Food and Drug Administration',
+    region: 'USA',
+    portal: 'FAERS / MedWatch',
+    deadlines: { fatal: 7, life_threatening: 7, serious: 15, non_serious: 90 },
+    validity_rules: {
+      patient_required: false,       // Patient non identifiable = cas VALIDE aux USA
+      reporter_required: true,
+      drug_required: true,
+      adr_required: true,
+      anonymous_patient_valid: true, // Différence clé vs EMA
+      consumer_report_valid: true,
+    },
+    submission_format: 'E2B(R3) via ESG',
+    language: 'en',
+    notes: '21 CFR 314.81 — patient anonyme accepté contrairement à EMA',
+  },
+  HEALTH_CANADA: {
+    name: 'Health Canada / Santé Canada',
+    region: 'Canada',
+    portal: 'Canada Vigilance',
+    deadlines: { fatal: 7, life_threatening: 7, serious: 15, non_serious: 90 },
+    validity_rules: {
+      patient_required: false,       // Même règle que FDA — patient anonyme valide
+      reporter_required: true,
+      drug_required: true,
+      adr_required: true,
+      anonymous_patient_valid: true,
+      consumer_report_valid: true,
+    },
+    submission_format: 'E2B(R3)',
+    language: 'en_fr',
+    notes: 'Bilingual EN/FR — patient anonyme accepté',
+  },
+  SAHPRA: {
+    name: 'South African Health Products Regulatory Authority',
+    region: 'South Africa',
+    portal: 'VigiFlow / SAHPRA portal',
+    deadlines: { fatal: 7, life_threatening: 7, serious: 15, non_serious: 90 },
+    validity_rules: {
+      patient_required: true,
+      reporter_required: true,
+      drug_required: true,
+      adr_required: true,
+      anonymous_patient_valid: false,
+      consumer_report_valid: true,
+    },
+    submission_format: 'E2B(R3) / VigiFlow',
+    language: 'en',
+    notes: 'Aligne ICH/EMA — même délais 7/15/90j — soumission via VigiFlow ou portail SAHPRA',
+  },
+  MHRA: {
+    name: 'Medicines and Healthcare products Regulatory Agency',
+    region: 'UK',
+    portal: 'MHRA Sentinel / Yellow Card',
+    deadlines: { fatal: 7, life_threatening: 7, serious: 15, non_serious: 90 },
+    validity_rules: {
+      patient_required: true,
+      reporter_required: true,
+      drug_required: true,
+      adr_required: true,
+      anonymous_patient_valid: false,
+      consumer_report_valid: true,
+    },
+    submission_format: 'E2B(R3)',
+    language: 'en',
+    notes: 'Post-Brexit — soumission indépendante de EudraVigilance depuis 2021',
+  },
+};
+
+function getAuthorityRules(authorityCode) {
+  return AUTHORITY_RULES[authorityCode?.toUpperCase()] || AUTHORITY_RULES.EMA;
+}
+
+function validateCaseForAuthority(extracted, authorityCode) {
+  const rules = getAuthorityRules(authorityCode);
+  const errors = [];
+  const warnings = [];
+
+  // Vérifier validité selon règles de l'autorité
+  if (rules.validity_rules.patient_required && !extracted.patientAge && !extracted.patientSex) {
+    if (!rules.validity_rules.anonymous_patient_valid) {
+      errors.push(`Patient non identifiable — cas INVALIDE pour ${rules.name}`);
+    } else {
+      warnings.push(`Patient anonyme — cas valide pour ${rules.name} (différent de EMA)`);
+    }
+  }
+  if (rules.validity_rules.reporter_required && !extracted.reporterName && !extracted.reporterType) {
+    errors.push(`Rapporteur non identifiable — cas INVALIDE pour ${rules.name}`);
+  }
+  if (rules.validity_rules.drug_required && !extracted.drugName) {
+    errors.push(`Médicament suspect manquant — cas INVALIDE pour ${rules.name}`);
+  }
+  if (rules.validity_rules.adr_required && !extracted.adrDescription) {
+    errors.push(`Effet indésirable non décrit — cas INVALIDE pour ${rules.name}`);
+  }
+
+  // Calcul délai selon sériosité
+  const isSerious = extracted.seriousness && extracted.seriousness !== 'non-serious';
+  const isFatal = extracted.seriousness?.includes('fatal') || extracted.seriousness?.includes('life_threatening');
+  const deadlineDays = isFatal ? rules.deadlines.fatal
+    : isSerious ? rules.deadlines.serious
+    : rules.deadlines.non_serious;
+
+  return {
+    authority: rules.name,
+    portal: rules.portal,
+    region: rules.region,
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    deadline_days: deadlineDays,
+    submission_format: rules.submission_format,
+    language: rules.language,
+    notes: rules.notes,
+  };
+}
+
+function _calcDeadlinesForAuthority(isSerious, criteria = [], authorityCode = 'EMA') {
+  const rules = getAuthorityRules(authorityCode);
+  const now = new Date();
+  const add = n => { const d = new Date(now); d.setDate(d.getDate() + n); return d; };
+  if (!isSerious) return { deadline7: null, deadline15: null, deadline90: add(rules.deadlines.non_serious) };
+  const fatal = criteria.some(c => ['fatal','life_threatening'].includes(c));
+  return {
+    deadline7:  fatal ? add(rules.deadlines.fatal) : null,
+    deadline15: !fatal ? add(rules.deadlines.serious) : null,
+    deadline90: add(rules.deadlines.non_serious),
+  };
+}
+
 async function extractIcsrData(sourceText, sourceType) {
   if (!sourceText || sourceText.trim().length < 20)
     throw new Error('Texte source trop court (< 20 caractères)');
@@ -832,8 +1002,62 @@ const upload = multer({
 // ─── Health ──────────────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) =>
-  res.json({ status:'ok', service:'PharmaVeil API', version:'1.0.0', timestamp: new Date().toISOString() })
+  res.json({ status:'ok', service:'PharmaVeil API', version:'1.1.0', timestamp: new Date().toISOString() })
 );
+
+// ─── GET /api/authorities ─────────────────────────────────────────────────────
+
+app.get('/api/authorities', (req, res) => {
+  const list = Object.entries(AUTHORITY_RULES).map(([code, r]) => ({
+    code,
+    name: r.name,
+    region: r.region,
+    portal: r.portal,
+    deadlines: r.deadlines,
+    submission_format: r.submission_format,
+    anonymous_patient_valid: r.validity_rules.anonymous_patient_valid,
+    notes: r.notes,
+  }));
+  return res.json({ authorities: list, total: list.length });
+});
+
+// ─── GET /api/cases/:id/validate-authority ────────────────────────────────────
+
+app.get('/api/cases/:id/validate-authority', async (req, res) => {
+  try {
+    const { authority = 'EMA' } = req.query;
+    const f = await dbGetFields(req.params.id);
+    if (!f) return res.status(404).json({ error: 'Cas non trouvé' });
+
+    const extracted = {
+      patientAge: f.patient_age, patientSex: f.patient_sex,
+      reporterName: f.reporter_name, reporterType: f.reporter_type,
+      drugName: f.drug_name, adrDescription: f.adr_description,
+      seriousness: f.seriousness,
+    };
+
+    // Valider pour l'autorité demandée
+    const validation = validateCaseForAuthority(extracted, authority);
+
+    // Valider pour toutes les autorités si demandé
+    let allAuthorities = null;
+    if (req.query.all === 'true') {
+      allAuthorities = Object.keys(AUTHORITY_RULES).map(code => ({
+        code,
+        ...validateCaseForAuthority(extracted, code),
+      }));
+    }
+
+    return res.json({
+      case_id: req.params.id,
+      authority,
+      validation,
+      all_authorities: allAuthorities,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Erreur validation autorité', details: err.message });
+  }
+});
 
 // ─── POST /api/cases/intake ───────────────────────────────────────────────────
 
@@ -1115,6 +1339,163 @@ app.use((req, res, next) => {
     req.on('data', chunk => data += chunk);
     req.on('end', () => { req.body = data; next(); });
   } else { next(); }
+});
+
+// ─── POST /api/cases/consolidate (F2 — Consolidation multi-sources) ─────────────
+
+app.post('/api/cases/consolidate', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const { sources, org_id } = req.body;
+    // sources = [{ type: 'email'|'manual'|'xml', content: '...' }, ...]
+    if (!Array.isArray(sources) || sources.length < 2) {
+      return res.status(400).json({ error: 'Au moins 2 sources requises pour la consolidation' });
+    }
+    if (sources.length > 5) {
+      return res.status(400).json({ error: 'Maximum 5 sources par consolidation' });
+    }
+
+    const orgId = org_id || 'default';
+
+    // Étape 1 — Extraire les données de chaque source
+    const extractedSources = [];
+    for (const src of sources) {
+      let data = null;
+      try {
+        if (src.type === 'xml') {
+          data = parseE2bXml(src.content);
+          data._sourceType = 'xml_e2b';
+        } else {
+          const normalized = normalizeSource(src.content, src.type);
+          const result = await extractIcsrData(normalized, src.type);
+          data = result.extracted;
+          data._sourceType = src.type;
+        }
+        extractedSources.push(data);
+      } catch (err) {
+        console.warn('[CONSOLIDATE] Source extraction failed:', err.message);
+      }
+    }
+
+    if (extractedSources.length === 0) {
+      return res.status(422).json({ error: "Aucune source extraite avec succès" });
+    }
+
+    // Étape 2 — Consolidation intelligente par Claude
+    const client = getAnthropicClient();
+    const sourcesText = extractedSources.map((s, i) => {
+      const summary = {
+        patient: { age: s.patientAge, sex: s.patientSex },
+        reporter: { name: s.reporterName, type: s.reporterType },
+        drug: s.drugName, adr: s.adrDescription,
+        seriousness: s.seriousness, meddra: s.meddraSearchTerm,
+        suspectDrugs: s.suspectDrugs,
+      };
+      return 'Source ' + (i+1) + ' (' + (s._sourceType || 'unknown') + '): ' + JSON.stringify(summary, null, 1);
+    }).join('\n\n');
+
+    const consolidatePrompt = 'Tu es un expert pharmacovigilance. Consolide ces ' + extractedSources.length + ' extractions de sources differentes du MEME cas ICSR en un seul enregistrement unifie.\n\n'
+      + 'REGLES:\n1. Prioriser les donnees les plus completes\n2. Priorite: XML E2B > Email > Manuel\n3. Fusionner descriptions ADR complementaires\n4. Conserver tous medicaments suspects\n\n'
+      + 'SOURCES:\n' + sourcesText + '\n\n'
+      + 'Reponds UNIQUEMENT avec ce JSON:\n'
+      + '{"patientAge":null,"patientSex":null,"patientWeight":null,"reporterName":null,"reporterType":null,"reporterCountry":null,'
+      + '"drugName":null,"drugDose":null,"drugRoute":null,"drugStartDate":null,"adrDescription":null,"adrOnsetDate":null,"adrOutcome":null,'
+      + '"seriousness":null,"meddraSearchTerm":null,"suspectDrugs":null,"consolidation_notes":null,"confidence_score":0.0,"gvp_valid":false}';
+
+    const consolidateResp = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: consolidatePrompt }],
+    });
+
+    const consolidated = _parseJson(consolidateResp.content[0]?.text || '{}');
+    const score = consolidated.confidence_score || 0.9;
+
+    // Étape 3 — Calculer les délais
+    const isSerious = consolidated.seriousness && consolidated.seriousness !== 'non-serious';
+    const criteria = consolidated.seriousness?.split(',') || [];
+    const deadlines = _calcDeadlines(isSerious, criteria);
+
+    // Étape 4 — Générer la narrative
+    const narrativeData = {
+      patientAge: consolidated.patientAge,
+      patientSex: consolidated.patientSex,
+      reporterName: consolidated.reporterName,
+      reporterType: consolidated.reporterType,
+      drugName: consolidated.drugName,
+      drugDose: consolidated.drugDose,
+      drugRoute: consolidated.drugRoute,
+      drugStartDate: consolidated.drugStartDate,
+      adrDescription: consolidated.adrDescription,
+      adrOnsetDate: consolidated.adrOnsetDate,
+      adrOutcome: consolidated.adrOutcome,
+      seriousness: consolidated.seriousness,
+      meddraSearchTerm: consolidated.meddraSearchTerm,
+      suspectDrugs: consolidated.suspectDrugs,
+    };
+    consolidated.narrative = await generateNarrative(narrativeData);
+
+    // Étape 5 — Sauvegarder
+    const caseId = crypto.randomUUID();
+    const sourcesSummary = sources.map(s => s.type).join('+');
+
+    await dbInsertCase({
+      id: caseId, orgId, status: 'pending_validation',
+      sourceType: `consolidated_${sourcesSummary}`,
+      rawContent: JSON.stringify(sources.map(s => ({ type: s.type, preview: s.content?.substring(0,200) }))),
+      receivedAt: new Date().toISOString(),
+      deadline7:  deadlines.deadline7?.toISOString()  || null,
+      deadline15: deadlines.deadline15?.toISOString() || null,
+      deadline90: deadlines.deadline90?.toISOString() || null,
+      seriousness: consolidated.seriousness,
+    });
+
+    await dbInsertFields({
+      id: crypto.randomUUID(), caseId,
+      patientAge:      consolidated.patientAge,
+      patientSex:      consolidated.patientSex,
+      patientWeight:   consolidated.patientWeight,
+      reporterName:    consolidated.reporterName,
+      reporterType:    consolidated.reporterType,
+      reporterCountry: consolidated.reporterCountry,
+      drugName:        consolidated.drugName,
+      drugDose:        consolidated.drugDose,
+      drugRoute:       consolidated.drugRoute,
+      drugStartDate:   consolidated.drugStartDate,
+      adrDescription:  consolidated.adrDescription,
+      adrOnsetDate:    consolidated.adrOnsetDate,
+      adrOutcome:      consolidated.adrOutcome,
+      seriousness:     consolidated.seriousness,
+      meddraSearchTerm: consolidated.meddraSearchTerm,
+      narrative:       consolidated.narrative,
+      suspectDrugs:    consolidated.suspectDrugs ? JSON.stringify(consolidated.suspectDrugs) : null,
+      confidenceScore: score,
+      confidenceFlag:  _confFlag(score),
+      gvpValid:        consolidated.gvp_valid || false,
+      rawLlmOutput:    JSON.stringify(consolidated),
+    });
+
+    await dbInsertAlerts(caseId, deadlines);
+    await dbInsertAudit(caseId, 'case_consolidated', req.ip);
+
+    return res.status(201).json({
+      case_id: caseId,
+      status: 'pending_validation',
+      source_type: `consolidated_${sourcesSummary}`,
+      sources_count: extractedSources.length,
+      consolidation_notes: consolidated.consolidation_notes,
+      narrative_generated: !!consolidated.narrative,
+      processing_ms: Date.now() - t0,
+      deadlines: {
+        deadline_7:  deadlines.deadline7?.toISOString()  || null,
+        deadline_15: deadlines.deadline15?.toISOString() || null,
+        deadline_90: deadlines.deadline90?.toISOString() || null,
+      },
+    });
+  } catch (err) {
+    console.error('[CONSOLIDATE]', err.message);
+    return res.status(500).json({ error: 'Erreur consolidation', details: process.env.NODE_ENV==='development' ? err.message : undefined });
+  }
 });
 
 // ─── GET /api/cases ───────────────────────────────────────────────────────────
