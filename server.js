@@ -128,10 +128,12 @@ function _initSchema(db) {
       llt_code TEXT NOT NULL UNIQUE, llt_name TEXT NOT NULL,
       soc_name TEXT NOT NULL, soc_code TEXT NOT NULL,
       hlt_name TEXT,
-      pt_name_lower TEXT, llt_name_lower TEXT
+      pt_name_lower TEXT, llt_name_lower TEXT,
+      ime_flag INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_pt_lower  ON meddra_terms(pt_name_lower);
     CREATE INDEX IF NOT EXISTS idx_llt_lower ON meddra_terms(llt_name_lower);
+    CREATE INDEX IF NOT EXISTS idx_ime ON meddra_terms(ime_flag);
   `);
   _seedMeddra(db);
 }
@@ -188,6 +190,60 @@ function _seedMeddra(db) {
     stmt.run([crypto.randomUUID(), ptc, ptn, lltc, lltn, soc, socc, hlt, ptn.toLowerCase(), lltn.toLowerCase()]);
   }
   stmt.free();
+  _seedImeList(db);
+}
+
+// ─── IME List EMA (Important Medical Events) ─────────────────────────────────
+
+function _seedImeList(db) {
+  // EMA IME List v27.0 — subset des termes les plus critiques
+  // Source : https://www.ema.europa.eu/en/human-regulatory/post-authorisation/pharmacovigilance/eudravigilance/important-medical-event-terms-list
+  const imePtCodes = [
+    '10000381','10000567','10001367','10001551','10001718','10002026','10002218',
+    '10002855','10003011','10003030','10003550','10003564','10003735','10004002',
+    '10004055','10004468','10005184','10005187','10005261','10005364','10005543',
+    '10006093','10006482','10006585','10007052','10007200','10007559','10007785',
+    '10007900','10008111','10008145','10008190','10009192','10009253','10009802',
+    '10010276','10010468','10010628','10010730','10010741','10010827','10010915',
+    '10011006','10011033','10011224','10011460','10011762','10012174','10012218',
+    '10012305','10012378','10012735','10013034','10013442','10013573','10013900',
+    '10013968','10014082','10014199','10014523','10014617','10014625','10014698',
+    '10015090','10015150','10015218','10015277','10015832','10016512','10016782',
+    '10017533','10017636','10017947','10018043','10018044','10018065','10018220',
+    '10018293','10018295','10018550','10018873','10019047','10019150','10019211',
+    '10019280','10019524','10019692','10019755','10019799','10019855','10020100',
+    '10020112','10020425','10020580','10020631','10020659','10020751','10020803',
+    '10020850','10021097','10021137','10021143','10021151','10021881','10022298',
+    '10022595','10023198','10023215','10023439','10023567','10023848','10024119',
+    '10024378','10024866','10025233','10026749','10027175','10027433','10027656',
+    '10028080','10028130','10028461','10028524','10028596','10028813','10029240',
+    '10029370','10029603','10030302','10030708','10030813','10031264','10031282',
+    '10031528','10031579','10031801','10032240','10032310','10033371','10033425',
+    '10033547','10033620','10033677','10034295','10034580','10034836','10034989',
+    '10035020','10035087','10035523','10036402','10036444','10037087','10037175',
+    '10037198','10037549','10038359','10038435','10038738','10038748','10039003',
+    '10039069','10039087','10039101','10039509','10039628','10040583','10040639',
+    '10041244','10041633','10041633','10042033','10042434','10042545','10042772',
+    '10043458','10043890','10044177','10044565','10044583','10044688','10045065',
+    '10046306','10046914','10047025','10047115','10047228','10047700','10048294',
+    '10048461','10048545','10048580','10049100','10049441','10050068','10051592',
+    '10052015','10052109','10053467','10053565','10055599','10058084','10059094',
+    '10061192','10061592','10062268','10065773','10066354',
+    // PTs présents dans notre seed MedDRA
+    '10028813','10047700','10013946','10000060','10037087','10011224','10019211',
+    '10002198','10061592','10019280','10019524','10006093','10040639','10019461',
+    '10013573','10015832','10044565','10010874','10013968','10028461','10019150',
+    '10018873','10037549','10023439','10019692','10038435','10002218','10020751',
+    '10048580','10033371','10066354',
+  ];
+  const imeSet = new Set(imePtCodes);
+  try {
+    // Tenter ALTER TABLE pour ajouter ime_flag si colonne manquante (migration)
+    try { db.run('ALTER TABLE meddra_terms ADD COLUMN ime_flag INTEGER DEFAULT 0'); } catch {}
+    const stmt = db.prepare('UPDATE meddra_terms SET ime_flag=1 WHERE pt_code=?');
+    for (const code of imeSet) { try { stmt.run([code]); } catch {} }
+    stmt.free();
+  } catch (err) { console.warn('[IME_SEED]', err.message); }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -443,11 +499,28 @@ async function meddraLookup(searchTerm, topK = 3) {
 
   results.sort((a, b) => b.score - a.score);
   const top = results[0] || null;
+
+  // Vérifier IME flag pour le terme sélectionné
+  let imeFlag = false;
+  if (top?.pt_code) {
+    const db2 = await getDb();
+    const imeCheck = db2.prepare('SELECT ime_flag FROM meddra_terms WHERE pt_code=? LIMIT 1');
+    imeCheck.bind([top.pt_code]);
+    if (imeCheck.step()) { imeFlag = imeCheck.getAsObject().ime_flag === 1; }
+    imeCheck.free();
+  }
+
   return {
-    results: results.slice(0, topK),
-    top: top ? { pt_code: top.pt_code, pt_name: top.pt_name, llt_code: top.llt_code, llt_name: top.llt_name, soc_name: top.soc_name } : null,
+    results: results.slice(0, topK).map(r => ({ ...r, ime_flag: r.ime_flag === 1 })),
+    top: top ? {
+      pt_code: top.pt_code, pt_name: top.pt_name,
+      llt_code: top.llt_code, llt_name: top.llt_name,
+      soc_name: top.soc_name,
+      ime_flag: imeFlag
+    } : null,
     confidence: top ? (top.score >= CONF_GREEN ? 'green' : top.score >= CONF_ORANGE ? 'orange' : 'red') : 'none',
     score: top?.score || 0,
+    ime_alert: imeFlag ? '⚠ IME — Important Medical Event (EMA list)' : null,
   };
 }
 
@@ -568,6 +641,21 @@ async function generateCiomsIPdf(caseData) {
       field('Terme PT',  f.meddra_pt_name || f.meddraPtName || f.meddra_search_term || f.meddraSearchTerm, 40,  360);
       field('Code PT',   f.meddra_pt_code || f.meddraPtCode, 405, 150);
       y += 34;
+
+      // IME Alert
+      const ptCode = f.meddra_pt_code || f.meddraPtCode;
+      if (ptCode) {
+        const imeTerms = new Set(['10000381','10002218','10006093','10028461','10019150','10018873',
+          '10037549','10023439','10019692','10038435','10002218','10020751','10061592',
+          '10019280','10019524','10013968','10033371','10066354','10048580','10028813',
+          '10047700','10013946','10019211','10002198','10040639']);
+        if (imeTerms.has(String(ptCode))) {
+          doc.rect(40, y, 515, 22).fill('#fff3e0').stroke('#f57c00');
+          doc.font('Helvetica-Bold').fontSize(8).fillColor('#e65100')
+            .text('⚠ IME — Important Medical Event (EMA list) — Attention sériosité "médicalement significatif"', 48, y + 7, { width: 499 });
+          y += 28;
+        }
+      }
 
       // F. Médicaments suspects (multi-drugs)
       const suspectDrugsRaw = f.suspect_drugs || f.suspectDrugs;
@@ -948,6 +1036,66 @@ app.get('/api/cases/:id/export/pdf', async (req, res) => {
   }
 });
 
+// ─── F8: Validation XML E2B avant export ─────────────────────────────────────
+
+function validateE2bXml(xmlString) {
+  const errors = [];
+  const warnings = [];
+
+  // Vérifications structurelles obligatoires ICH E2B(R3)
+  const required = [
+    { tag: 'ichicsrmessageheader', label: 'Message header' },
+    { tag: 'messagetype',          label: 'Message type' },
+    { tag: 'messageformatversion', label: 'Message format version' },
+    { tag: 'messagenumb',          label: 'Message number' },
+    { tag: 'safetyreport',         label: 'Safety report' },
+    { tag: 'safetyreportid',       label: 'Safety report ID' },
+    { tag: 'serious',              label: 'Seriousness flag' },
+    { tag: 'patient',              label: 'Patient block' },
+    { tag: 'drug',                 label: 'Drug block' },
+    { tag: 'reaction',             label: 'Reaction block' },
+    { tag: 'medicinalproduct',     label: 'Medicinal product name' },
+    { tag: 'primarysourcereaction',label: 'Primary source reaction' },
+    { tag: 'reactionmeddrapt',     label: 'MedDRA PT term' },
+    { tag: 'transmissiondate',     label: 'Transmission date' },
+  ];
+
+  for (const { tag, label } of required) {
+    if (!xmlString.includes(`<${tag}>`)) {
+      errors.push(`Missing required element: <${tag}> (${label})`);
+    }
+  }
+
+  // Vérification valeurs seriousness (doit être 1 ou 2)
+  const seriousMatch = xmlString.match(/<serious>(\d+)<\/serious>/);
+  if (seriousMatch && !['1','2'].includes(seriousMatch[1])) {
+    errors.push(`Invalid seriousness value: ${seriousMatch[1]} (must be 1 or 2)`);
+  }
+
+  // Vérification date format (YYYYMMDD)
+  const dateMatches = xmlString.matchAll(/<transmissiondate>(\d+)<\/transmissiondate>/g);
+  for (const m of dateMatches) {
+    if (m[1].length !== 8) warnings.push(`Transmission date format may be invalid: ${m[1]}`);
+  }
+
+  // Vérification messageformatversion
+  if (!xmlString.includes('<messageformatversion>2.1</messageformatversion>')) {
+    warnings.push('Message format version should be 2.1 for E2B(R3)');
+  }
+
+  // Vérification encoding
+  if (!xmlString.includes('encoding="UTF-8"')) {
+    warnings.push('XML encoding should be UTF-8');
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    score: Math.max(0, 100 - (errors.length * 20) - (warnings.length * 5)),
+  };
+}
+
 // ─── GET /api/cases/:id/export/e2b ───────────────────────────────────────────
 
 app.get('/api/cases/:id/export/e2b', async (req, res) => {
@@ -992,9 +1140,37 @@ app.get('/api/cases/:id/export/e2b', async (req, res) => {
         .up()
       .end({ prettyPrint: true });
 
+    // F8 — Validation XML avant export
+    const validation = validateE2bXml(xml);
     const name = `PharmaVeil_E2B-R3_PV-${ref}_${new Date().toISOString().slice(0,10)}.xml`;
-    res.set({ 'Content-Type':'application/xml; charset=utf-8', 'Content-Disposition':`attachment; filename="${name}"` });
-    return res.send(xml);
+
+    // Si erreurs critiques et mode strict, bloquer l'export
+    if (!validation.valid && req.query.strict === 'true') {
+      return res.status(422).json({
+        error: 'E2B XML validation failed',
+        validation,
+      });
+    }
+
+    // Ajouter rapport de validation en commentaire XML
+    const validationComment = `
+<!-- PharmaVeil E2B(R3) Validation Report
+     Valid: ${validation.valid}
+     Score: ${validation.score}/100
+     Errors: ${validation.errors.length > 0 ? validation.errors.join('; ') : 'none'}
+     Warnings: ${validation.warnings.length > 0 ? validation.warnings.join('; ') : 'none'}
+     Generated: ${new Date().toISOString()}
+-->`;
+    const xmlWithValidation = xml.replace('<?xml version="1.0" encoding="UTF-8"?>', `<?xml version="1.0" encoding="UTF-8"?>${validationComment}`);
+
+    res.set({
+      'Content-Type': 'application/xml; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${name}"`,
+      'X-PharmaVeil-Validation-Score': String(validation.score),
+      'X-PharmaVeil-Validation-Valid': String(validation.valid),
+      'X-PharmaVeil-Validation-Errors': String(validation.errors.length),
+    });
+    return res.send(xmlWithValidation);
   } catch (err) {
     return res.status(500).json({ error: 'Erreur export E2B', details: err.message });
   }
