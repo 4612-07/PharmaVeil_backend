@@ -38,9 +38,9 @@ const cors      = require('cors');
 const helmet    = require('helmet');
 const morgan    = require('morgan');
 const multer    = require('multer');
-let pdfParse = null;
+const pdfParse  = require('pdf-parse');
 const PDFDoc    = require('pdfkit');
-const { randomUUID: uuidv4 } = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 const { z }     = require('zod');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs        = require('fs');
@@ -96,6 +96,8 @@ function _initSchema(db) {
       seriousness TEXT,
       meddra_search_term TEXT, meddra_pt_code TEXT, meddra_pt_name TEXT,
       meddra_llt_code TEXT, meddra_llt_name TEXT,
+      narrative TEXT,
+      suspect_drugs TEXT,
       confidence_score REAL DEFAULT 0,
       confidence_flag TEXT DEFAULT 'red',
       raw_llm_output TEXT,
@@ -290,8 +292,9 @@ async function extractIcsrData(sourceText, sourceType) {
   if (!sourceText || sourceText.trim().length < 20)
     throw new Error('Texte source trop court (< 20 caractères)');
 
-  const response = await getAnthropicClient().messages.create({
-    model: 'claude-sonnet-4-6', max_tokens: 2000,
+  const client = getAnthropicClient();
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-6', max_tokens: 2500,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserPrompt(sourceText, sourceType) }],
   });
@@ -303,42 +306,100 @@ async function extractIcsrData(sourceText, sourceType) {
   const score = typeof data.confidence_score === 'number' ? data.confidence_score : 0;
   const deadlines = _calcDeadlines(data.seriousness?.is_serious, data.seriousness?.criteria);
 
-  return {
-    extracted: {
-      patientAge:       data.patient?.age      ?? null,
-      patientSex:       data.patient?.sex      ?? null,
-      patientWeight:    data.patient?.weight   ?? null,
-      reporterName:     data.reporter?.name    ?? null,
-      reporterType:     data.reporter?.type    ?? null,
-      reporterCountry:  data.reporter?.country ?? null,
-      drugName:         data.drug?.name        ?? null,
-      drugDose:         data.drug?.dose        ?? null,
-      drugRoute:        data.drug?.route       ?? null,
-      drugStartDate:    data.drug?.start_date  ?? null,
-      adrDescription:   data.adr?.description  ?? null,
-      adrOnsetDate:     data.adr?.onset_date   ?? null,
-      adrOutcome:       data.adr?.outcome      ?? null,
-      seriousness:      data.seriousness?.is_serious
-                          ? (data.seriousness.criteria?.join(',') || 'serious')
-                          : 'non-serious',
-      meddraSearchTerm: data.meddra_search_term  ?? null,
-      confidenceScore:  score,
-      confidenceFlag:   _confFlag(score),
-      gvpValid:         data.gvp_valid           ?? false,
-      rawLlmOutput:     raw,
-      confidenceNotes:  data.confidence_notes    ?? null,
-      reportType:       data.report_type         ?? 'unknown',
-      languageDetected: data.language_detected   ?? 'fr',
-    },
-    deadlines,
+  // Build extracted object
+  const extracted = {
+    patientAge:       data.patient?.age      ?? null,
+    patientSex:       data.patient?.sex      ?? null,
+    patientWeight:    data.patient?.weight   ?? null,
+    reporterName:     data.reporter?.name    ?? null,
+    reporterType:     data.reporter?.type    ?? null,
+    reporterCountry:  data.reporter?.country ?? null,
+    drugName:         data.drug?.name        ?? null,
+    drugDose:         data.drug?.dose        ?? null,
+    drugRoute:        data.drug?.route       ?? null,
+    drugStartDate:    data.drug?.start_date  ?? null,
+    adrDescription:   data.adr?.description  ?? null,
+    adrOnsetDate:     data.adr?.onset_date   ?? null,
+    adrOutcome:       data.adr?.outcome      ?? null,
+    seriousness:      data.seriousness?.is_serious
+                        ? (data.seriousness.criteria?.join(',') || 'serious')
+                        : 'non-serious',
+    meddraSearchTerm: data.meddra_search_term  ?? null,
+    suspectDrugs:     Array.isArray(data.suspect_drugs) && data.suspect_drugs.length > 0
+                        ? data.suspect_drugs
+                        : (data.drug?.name ? [{ ...data.drug, suspect_or_concomitant: 'suspect' }] : null),
+    confidenceScore:  score,
+    confidenceFlag:   _confFlag(score),
+    gvpValid:         data.gvp_valid           ?? false,
+    rawLlmOutput:     raw,
+    confidenceNotes:  data.confidence_notes    ?? null,
+    reportType:       data.report_type         ?? 'unknown',
+    languageDetected: data.language_detected   ?? 'fr',
   };
+
+  // Generate clinical narrative (second Claude call)
+  extracted.narrative = await generateNarrative(extracted);
+
+  return { extracted, deadlines };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  4b. GÉNÉRATION NARRATIVE CLINIQUE (Auto-narratif)
+// ═══════════════════════════════════════════════════════════════════
+
+async function generateNarrative(extracted) {
+  try {
+    const client = getAnthropicClient();
+    const { patientAge, patientSex, patientWeight, reporterName, reporterType,
+            drugName, drugDose, drugRoute, drugStartDate,
+            adrDescription, adrOnsetDate, adrOutcome, seriousness,
+            meddraSearchTerm, suspectDrugs } = extracted;
+
+    const drugsText = suspectDrugs && suspectDrugs.length > 0
+      ? suspectDrugs.map(d =>
+          `${d.name || drugName}${d.dose ? ' ' + d.dose : ''}${d.route ? ' via ' + d.route : ''}${d.start_date ? ' from ' + d.start_date : ''}${d.stop_date ? ' to ' + d.stop_date : ''} [${d.suspect_or_concomitant || 'suspect'}]`
+        ).join('; ')
+      : `${drugName || 'unknown drug'}${drugDose ? ' ' + drugDose : ''}${drugRoute ? ' via ' + drugRoute : ''}${drugStartDate ? ' since ' + drugStartDate : ''}`;
+
+    const prompt = `You are a pharmacovigilance expert. Write a concise clinical narrative for this ICSR case following ICH E2B(R3) and CIOMS I standards.
+
+Case data:
+- Patient: ${patientAge || 'unknown age'} ${patientSex || 'unknown sex'}${patientWeight ? ', ' + patientWeight : ''}
+- Reporter: ${reporterName || 'unknown'} (${reporterType || 'unknown'})
+- Drug(s): ${drugsText}
+- Adverse reaction: ${adrDescription || 'not described'}
+- Onset date: ${adrOnsetDate || 'unknown'}
+- Outcome: ${adrOutcome || 'unknown'}
+- Seriousness: ${seriousness || 'unknown'}
+- MedDRA term: ${meddraSearchTerm || 'pending coding'}
+
+Write a professional clinical narrative in English (3-5 sentences). Structure:
+1. Patient description + drug(s) exposure with doses and dates
+2. Adverse reaction description and onset
+3. Actions taken (dechallenge, hospitalisation, etc.) and outcome
+4. Brief causality comment if inferable
+
+Respond ONLY with the narrative text. No labels, no JSON, no preamble.`;
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 500,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    return response.content[0]?.text?.trim() || null;
+  } catch (err) {
+    console.error('[NARRATIVE]', err.message);
+    return null;
+  }
 }
 
 async function checkDuplicate(extracted, recentCases) {
   if (!recentCases?.length)
     return { isDuplicate: false, duplicateCaseId: null, confidence: 0, reason: 'Aucun cas récent' };
   try {
-    const res = await getAnthropicClient().messages.create({
+    const client = getAnthropicClient();
+    const res = await client.messages.create({
       model: 'claude-sonnet-4-6', max_tokens: 300,
       messages: [{ role: 'user', content: buildDuplicatePrompt(extracted, recentCases) }],
     });
@@ -508,8 +569,38 @@ async function generateCiomsIPdf(caseData) {
       field('Code PT',   f.meddra_pt_code || f.meddraPtCode, 405, 150);
       y += 34;
 
-      // F. Sériosité + Délais
-      section('F. Sériosité et délais réglementaires');
+      // F. Médicaments suspects (multi-drugs)
+      const suspectDrugsRaw = f.suspect_drugs || f.suspectDrugs;
+      if (suspectDrugsRaw) {
+        let drugs = [];
+        try { drugs = typeof suspectDrugsRaw === 'string' ? JSON.parse(suspectDrugsRaw) : suspectDrugsRaw; } catch {}
+        if (drugs && drugs.length > 1) {
+          section('F. Médicaments suspects / Concomitants');
+          drugs.forEach((d, i) => {
+            const dLabel = `${i+1}. ${d.name || '—'} [${d.suspect_or_concomitant || 'suspect'}]`;
+            const dDetail = [d.dose, d.route, d.start_date ? `début: ${d.start_date}` : null, d.stop_date ? `arrêt: ${d.stop_date}` : null].filter(Boolean).join(' · ');
+            const dh2 = 28;
+            doc.rect(40, y, 515, dh2).stroke('#d0d5e0');
+            doc.font('Helvetica-Bold').fontSize(8).fillColor('#0c1120').text(dLabel, 44, y + 4, { width: 507 });
+            doc.font('Helvetica').fontSize(7.5).fillColor('#555e7a').text(dDetail || '—', 44, y + 16, { width: 507 });
+            y += dh2 + 4;
+          });
+        }
+      }
+
+      // G. Narrative clinique (auto-générée par IA)
+      const narrativeText = f.narrative || f.narrativeText;
+      if (narrativeText) {
+        section('G. Narrative clinique (IA — à valider)');
+        const nh = Math.max(55, Math.ceil(narrativeText.length / 72) * 12 + 20);
+        doc.rect(40, y, 515, nh).fill('#f0fdf8').stroke('#00d4aa');
+        doc.font('Helvetica-Bold').fontSize(7).fillColor('#00796b').text('NARRATIVE (draft IA — Human review required)', 44, y + 4, { width: 507 });
+        doc.font('Helvetica').fontSize(8.5).fillColor('#0c1120').text(narrativeText, 44, y + 16, { width: 507 });
+        y += nh + 8;
+      }
+
+      // H. Sériosité + Délais
+      section('H. Sériosité et délais réglementaires');
       field('Cas sérieux', serious ? 'OUI — Cas sérieux' : 'NON — Cas non sérieux', 40, 260);
       const dl = caseData.deadline_7 || caseData.deadline7;
       const dl15 = caseData.deadline_15 || caseData.deadline15;
@@ -556,12 +647,14 @@ async function dbInsertCase(data) {
 
 async function dbInsertFields(data) {
   const db = await getDb();
-  db.run(`INSERT INTO extracted_fields (id,case_id,patient_age,patient_sex,patient_weight,reporter_name,reporter_type,reporter_country,drug_name,drug_dose,drug_route,drug_start_date,adr_description,adr_onset_date,adr_outcome,seriousness,meddra_search_term,confidence_score,confidence_flag,raw_llm_output,gvp_valid,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  db.run(`INSERT INTO extracted_fields (id,case_id,patient_age,patient_sex,patient_weight,reporter_name,reporter_type,reporter_country,drug_name,drug_dose,drug_route,drug_start_date,adr_description,adr_onset_date,adr_outcome,seriousness,meddra_search_term,narrative,suspect_drugs,confidence_score,confidence_flag,raw_llm_output,gvp_valid,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [data.id, data.caseId, data.patientAge, data.patientSex, data.patientWeight,
      data.reporterName, data.reporterType, data.reporterCountry,
      data.drugName, data.drugDose, data.drugRoute, data.drugStartDate,
      data.adrDescription, data.adrOnsetDate, data.adrOutcome, data.seriousness,
-     data.meddraSearchTerm, data.confidenceScore, data.confidenceFlag, data.rawLlmOutput,
+     data.meddraSearchTerm, data.narrative || null,
+     data.suspectDrugs ? JSON.stringify(data.suspectDrugs) : null,
+     data.confidenceScore, data.confidenceFlag, data.rawLlmOutput,
      data.gvpValid ? 1 : 0, new Date().toISOString()]);
   _saveDb();
 }
@@ -628,14 +721,13 @@ const PORT = process.env.PORT || 3001;
 app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-  ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app', 'https://aquamarine-chaja-6f97f3.netlify.app']
+  ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app']
   : '*',
-  methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
 }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE_MB || '10') * 1024 * 1024 },
@@ -727,22 +819,18 @@ app.post('/api/cases/intake', async (req, res) => {
 });
 
 // ─── POST /api/cases/intake/pdf ───────────────────────────────────────────────
-app.options('/api/cases/intake/pdf', cors());
-app.post('/api/cases/intake/pdf', cors(), upload.single('file'), async (req, res) => {
+
+app.post('/api/cases/intake/pdf', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Fichier PDF requis (champ: file)' });
     let pdfText;
-    if (!pdfParse) { process.env.PDFJS_DISABLE_WORKER = '1'; pdfParse = require('pdf-parse'); }
     try { const d = await pdfParse(req.file.buffer); pdfText = d.text; }
     catch { return res.status(422).json({ error: 'PDF illisible ou protégé' }); }
     if (!pdfText?.trim() || pdfText.trim().length < 30)
       return res.status(422).json({ error: 'PDF vide ou non-textuel' });
-
     req.body = { source_type: 'manual', manual_text: pdfText, org_id: req.body?.org_id };
-    req.url = '/api/cases/intake';
-req.method = 'POST';
-return app(req, res);
-  } catch (err) { console.error('[PDF-INTAKE]', err.message, err.stack); return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
+    return app._router.handle(req, res, () => {});
+  } catch (err) { return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
 });
 
 // ─── GET /api/cases ───────────────────────────────────────────────────────────
@@ -920,9 +1008,6 @@ app.use((req, res) =>
 
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.stack);
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (err.code === 'LIMIT_FILE_SIZE')
     return res.status(413).json({ error: 'Fichier trop volumineux' });
   res.status(500).json({ error: 'Erreur interne', details: process.env.NODE_ENV==='development' ? err.message : undefined });
