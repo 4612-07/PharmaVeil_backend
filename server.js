@@ -809,7 +809,7 @@ const PORT = process.env.PORT || 3001;
 app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-  ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app']
+  ? ['https://pharmaveil.eu', 'https://pharmaveil.fr', 'https://en.pharmaveil.eu', 'https://app.pharmaveil.eu', 'https://delightful-haupia-395e44.netlify.app', 'https://leafy-cuchufli-51f277.netlify.app', 'https://aquamarine-chaja-6f97f3.netlify.app']
   : '*',
 }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -819,7 +819,14 @@ app.use(express.urlencoded({ extended: true }));
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE_MB || '10') * 1024 * 1024 },
-  fileFilter: (req, file, cb) => file.mimetype === 'application/pdf' ? cb(null, true) : cb(new Error('PDF uniquement'), false),
+  fileFilter: (req, file, cb) => {
+    const allowed = ['application/pdf', 'application/xml', 'text/xml'];
+    if (allowed.includes(file.mimetype) || file.originalname?.endsWith('.xml')) {
+      cb(null, true);
+    } else {
+      cb(new Error('PDF ou XML uniquement'), false);
+    }
+  },
 });
 
 // ─── Health ──────────────────────────────────────────────────────────────────
@@ -919,6 +926,195 @@ app.post('/api/cases/intake/pdf', upload.single('file'), async (req, res) => {
     req.body = { source_type: 'manual', manual_text: pdfText, org_id: req.body?.org_id };
     return app._router.handle(req, res, () => {});
   } catch (err) { return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
+});
+
+// ─── POST /api/cases/intake/xml (F1 — Import E2B R3) ─────────────────────────
+
+function parseE2bXml(xmlText) {
+  // Parser E2B(R3) XML entrant — extraction des champs ICH
+  const get = (tag) => {
+    const m = xmlText.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i'));
+    return m ? m[1].trim() : null;
+  };
+  const getAll = (tag) => {
+    const results = [];
+    const re = new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'gi');
+    let m;
+    while ((m = re.exec(xmlText)) !== null) results.push(m[1].trim());
+    return results;
+  };
+
+  // Patient
+  const patientSexRaw = get('patientsex');
+  const patientSex = patientSexRaw === '1' ? 'M' : patientSexRaw === '2' ? 'F' : null;
+  const patientAgeRaw = get('patientonsetage') || get('patientage');
+
+  // Drug(s) — peut y en avoir plusieurs
+  const drugBlocks = xmlText.match(/<drug[\s\S]*?<\/drug>/gi) || [];
+  const drugs = drugBlocks.map(block => {
+    const getName = (t) => { const m = block.match(new RegExp(`<${t}[^>]*>([^<]*)</${t}>`, 'i')); return m ? m[1].trim() : null; };
+    return {
+      name: getName('medicinalproduct'),
+      dose: getName('drugdosagetext') || getName('drugdosage'),
+      route: getName('drugroute'),
+      start_date: getName('drugstartdate'),
+      stop_date: getName('drugenddate'),
+      suspect_or_concomitant: getName('drugcharacterization') === '1' ? 'suspect' : 'concomitant',
+    };
+  }).filter(d => d.name);
+
+  // Reaction
+  const adrDescription = get('primarysourcereaction') || get('reportercomment');
+  const meddrapt       = get('reactionmeddrapt');
+  const adrOnset       = get('reactionstartdate');
+  const adrOutcome     = get('reactionoutcome');
+
+  // Seriousness
+  const seriousRaw = get('serious');
+  const isSerious  = seriousRaw === '1';
+  const criteria   = [];
+  if (get('seriousnessdeath') === '1')           criteria.push('fatal');
+  if (get('seriousnesslifethreatening') === '1') criteria.push('life_threatening');
+  if (get('seriousnesshospitalization') === '1') criteria.push('hospitalization');
+  if (get('seriousnessdisabling') === '1')       criteria.push('disability');
+  if (get('seriousnesscongenitalanomali') === '1') criteria.push('congenital_anomaly');
+  if (get('seriousnessother') === '1')           criteria.push('other');
+
+  // Reporter
+  const reporterType = get('primarysourcereportertype') || get('reportertype');
+
+  // Transmission date
+  const txDate = get('transmissiondate') || get('receiptdate');
+  const receivedAt = txDate && txDate.length === 8
+    ? `${txDate.slice(0,4)}-${txDate.slice(4,6)}-${txDate.slice(6,8)}T00:00:00.000Z`
+    : new Date().toISOString();
+
+  // Safety report ID (pour référence)
+  const safetyReportId = get('safetyreportid') || get('messagenumb');
+
+  return {
+    patientAge:      patientAgeRaw,
+    patientSex,
+    patientWeight:   get('patientweight'),
+    reporterName:    get('reportername') || get('primarysourcereporter'),
+    reporterType:    reporterType === '1' ? 'physician' : reporterType === '2' ? 'pharmacist' : reporterType === '3' ? 'other_health_professional' : reporterType === '5' ? 'patient' : reporterType,
+    reporterCountry: get('primarysourcecountry') || get('reportercountry'),
+    drugName:        drugs[0]?.name || null,
+    drugDose:        drugs[0]?.dose || null,
+    drugRoute:       drugs[0]?.route || null,
+    drugStartDate:   drugs[0]?.start_date || null,
+    suspectDrugs:    drugs.length > 0 ? drugs : null,
+    adrDescription,
+    adrOnsetDate:    adrOnset && adrOnset.length === 8
+                       ? `${adrOnset.slice(0,4)}-${adrOnset.slice(4,6)}-${adrOnset.slice(6,8)}`
+                       : adrOnset,
+    adrOutcome:      adrOutcome === '1' ? 'recovered' : adrOutcome === '2' ? 'recovering' : adrOutcome === '3' ? 'not_recovered' : adrOutcome === '5' ? 'fatal' : adrOutcome === '0' ? 'unknown' : adrOutcome,
+    seriousness:     isSerious ? (criteria.join(',') || 'serious') : 'non-serious',
+    meddraSearchTerm: meddrapt || adrDescription,
+    meddraSearchPt:   meddrapt,
+    confidenceScore:  0.95,
+    confidenceFlag:   'green',
+    gvpValid:         !!(drugs[0]?.name && adrDescription),
+    rawLlmOutput:     null,
+    narrative:        null,
+    safetyReportId,
+    receivedAt,
+    isSerious,
+    criteria,
+  };
+}
+
+app.post('/api/cases/intake/xml', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    let xmlText = '';
+
+    // Accepter XML en body text/xml ou application/xml ou champ xml_content
+    if (typeof req.body === 'string' && req.body.trim().startsWith('<')) {
+      xmlText = req.body;
+    } else if (req.body?.xml_content) {
+      xmlText = req.body.xml_content;
+    } else {
+      return res.status(400).json({ error: 'XML E2B(R3) requis — body XML ou champ xml_content' });
+    }
+
+    if (!xmlText.includes('ichicsr') && !xmlText.includes('safetyreport')) {
+      return res.status(422).json({ error: 'Format XML non reconnu — E2B(R3) ICH attendu' });
+    }
+
+    const orgId = req.body?.org_id || 'default';
+
+    // Parser le XML E2B entrant
+    const extracted = parseE2bXml(xmlText);
+
+    // Calculer les délais
+    const deadlines = _calcDeadlines(
+      extracted.seriousness !== 'non-serious',
+      extracted.criteria || []
+    );
+
+    // Générer la narrative si données suffisantes
+    if (extracted.gvpValid) {
+      try { extracted.narrative = await generateNarrative(extracted); } catch {}
+    }
+
+    const caseId = crypto.randomUUID();
+
+    await dbInsertCase({
+      id: caseId, orgId, status: 'pending_validation', sourceType: 'xml_e2b',
+      rawContent: xmlText.substring(0, 50000),
+      receivedAt: extracted.receivedAt || new Date().toISOString(),
+      deadline7:  deadlines.deadline7?.toISOString()  || null,
+      deadline15: deadlines.deadline15?.toISOString() || null,
+      deadline90: deadlines.deadline90?.toISOString() || null,
+      seriousness: extracted.seriousness,
+    });
+    await dbInsertFields({ id: crypto.randomUUID(), caseId, ...extracted });
+    await dbInsertAlerts(caseId, deadlines);
+    await dbInsertAudit(caseId, 'case_created_xml', req.ip);
+
+    // Vérif doublons
+    let duplicateInfo = { isDuplicate: false, duplicateCaseId: null };
+    try {
+      const recent = await dbGetRecentFields(orgId, caseId);
+      duplicateInfo = await checkDuplicate(extracted, recent);
+      if (duplicateInfo.isDuplicate) {
+        const db = await getDb();
+        db.run('UPDATE icsr_cases SET duplicate_flag=1 WHERE id=?', [caseId]);
+        _saveDb();
+      }
+    } catch {}
+
+    return res.status(201).json({
+      case_id: caseId,
+      status: 'pending_validation',
+      source_type: 'xml_e2b',
+      source_reference: extracted.safetyReportId || null,
+      processing_ms: Date.now() - t0,
+      drugs_detected: extracted.suspectDrugs?.length || 1,
+      narrative_generated: !!extracted.narrative,
+      duplicate_flag: duplicateInfo.isDuplicate,
+      gvp_valid: extracted.gvpValid,
+      seriousness: extracted.seriousness,
+      deadlines: {
+        deadline_7:  deadlines.deadline7?.toISOString()  || null,
+        deadline_15: deadlines.deadline15?.toISOString() || null,
+        deadline_90: deadlines.deadline90?.toISOString() || null,
+      },
+    });
+  } catch (err) {
+    console.error('[INTAKE_XML]', err.message);
+    return res.status(500).json({ error: 'Erreur import XML', details: process.env.NODE_ENV==='development' ? err.message : undefined });
+  }
+});
+
+// Middleware pour accepter XML content-type
+app.use((req, res, next) => {
+  if (req.path === '/api/cases/intake/xml' && (req.headers['content-type']?.includes('xml'))) {
+    let data = '';
+    req.on('data', chunk => data += chunk);
+    req.on('end', () => { req.body = data; next(); });
+  } else { next(); }
 });
 
 // ─── GET /api/cases ───────────────────────────────────────────────────────────
