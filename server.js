@@ -40,11 +40,11 @@ const morgan    = require('morgan');
 const multer    = require('multer');
 const pdfParse  = require('pdf-parse');
 const PDFDoc    = require('pdfkit');
-const { v4: uuidv4 } = require('uuid');
 const { z }     = require('zod');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs        = require('fs');
 const path      = require('path');
+const crypto    = require('crypto');
 
 // ═══════════════════════════════════════════════════════════════════
 //  1. BASE DE DONNÉES (sql.js — SQLite pur JS)
@@ -185,7 +185,7 @@ function _seedMeddra(db) {
   for (const [ptc,ptn,lltc,lltn,soc,socc,hlt] of terms) {
     if (seen.has(lltc)) continue;
     seen.add(lltc);
-    stmt.run([uuidv4(), ptc, ptn, lltc, lltn, soc, socc, hlt, ptn.toLowerCase(), lltn.toLowerCase()]);
+    stmt.run([crypto.randomUUID(), ptc, ptn, lltc, lltn, soc, socc, hlt, ptn.toLowerCase(), lltn.toLowerCase()]);
   }
   stmt.free();
 }
@@ -662,7 +662,7 @@ async function dbInsertFields(data) {
 async function dbInsertAudit(caseId, action, ip, userId = null) {
   const db = await getDb();
   db.run(`INSERT INTO validation_audit (id,case_id,user_id,action,ip_address,created_at) VALUES (?,?,?,?,?,?)`,
-    [uuidv4(), caseId, userId, action, ip, new Date().toISOString()]);
+    [crypto.randomUUID(), caseId, userId, action, ip, new Date().toISOString()]);
   _saveDb();
 }
 
@@ -673,7 +673,7 @@ async function dbInsertAlerts(caseId, deadlines) {
     if (!deadline) return;
     const t = new Date(deadline.getTime() - daysBefore * 86400000);
     if (t > now) db.run(`INSERT INTO alerts (id,case_id,alert_type,trigger_at,created_at) VALUES (?,?,?,?,?)`,
-      [uuidv4(), caseId, type, t.toISOString(), now.toISOString()]);
+      [crypto.randomUUID(), caseId, type, t.toISOString(), now.toISOString()]);
   };
   add('7j_D-3',  deadlines.deadline7,  3); add('7j_D-1',  deadlines.deadline7,  1);
   add('15j_D-3', deadlines.deadline15, 3); add('15j_D-1', deadlines.deadline15, 1);
@@ -761,7 +761,7 @@ app.post('/api/cases/intake', async (req, res) => {
     if (!cv.valid) return res.status(422).json({ error: cv.reason });
 
     const { extracted, deadlines } = await extractIcsrData(normalized, source_type);
-    const caseId = uuidv4();
+    const caseId = crypto.randomUUID();
     const rawStr = typeof rawContent === 'object' ? JSON.stringify(rawContent) : rawContent;
 
     await dbInsertCase({
@@ -772,7 +772,7 @@ app.post('/api/cases/intake', async (req, res) => {
       deadline90: deadlines.deadline90?.toISOString() || null,
       seriousness: extracted.seriousness,
     });
-    await dbInsertFields({ id: uuidv4(), caseId, ...extracted });
+    await dbInsertFields({ id: crypto.randomUUID(), caseId, ...extracted });
     await dbInsertAlerts(caseId, deadlines);
     await dbInsertAudit(caseId, 'case_created', req.ip);
 
