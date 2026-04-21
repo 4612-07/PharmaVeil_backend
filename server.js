@@ -838,13 +838,22 @@ async function generateCiomsIPdf(caseData) {
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#fff').text(serious ? 'CAS SÉRIEUX' : 'CAS NON SÉRIEUX', 390, y + 10, { align:'center', width:165 });
       y += 50;
 
-      // Helper
+      // Helper — gestion dépassement de page
+      const PAGE_H = doc.page.height - 60;
+      const checkPage = (needed = 40) => {
+        if (y + needed > PAGE_H) {
+          doc.addPage();
+          y = 40;
+        }
+      };
       const section = (title) => {
+        checkPage(30);
         doc.rect(40, y, 515, 18).fill('#0c1120');
         doc.font('Helvetica-Bold').fontSize(8).fillColor('#fff').text(title.toUpperCase(), 48, y + 4);
         y += 24;
       };
       const field = (label, value, x, w, h = 28, alt = false) => {
+        checkPage(h + 4);
         if (alt) doc.rect(x, y, w, h).fill('#f7f8fc');
         doc.rect(x, y, w, h).stroke('#d0d5e0');
         doc.font('Helvetica-Bold').fontSize(7).fillColor('#555e7a').text(label, x + 4, y + 3, { width: w - 8 });
@@ -930,8 +939,9 @@ async function generateCiomsIPdf(caseData) {
       // G. Narrative clinique (auto-générée par IA)
       const narrativeText = f.narrative || f.narrativeText;
       if (narrativeText) {
-        section('G. Narrative clinique (IA — à valider)');
         const nh = Math.max(55, Math.ceil(narrativeText.length / 72) * 12 + 20);
+        checkPage(nh + 30);
+        section('G. Narrative clinique (IA — à valider)');
         doc.rect(40, y, 515, nh).fill('#f0fdf8').stroke('#00d4aa');
         doc.font('Helvetica-Bold').fontSize(7).fillColor('#00796b').text('NARRATIVE (draft IA — Human review required)', 44, y + 4, { width: 507 });
         doc.font('Helvetica').fontSize(8.5).fillColor('#0c1120').text(narrativeText, 44, y + 16, { width: 507 });
@@ -960,6 +970,7 @@ async function generateCiomsIPdf(caseData) {
       y += 20;
 
       // Footer
+      checkPage(30);
       const fh = doc.page.height - 50;
       doc.strokeColor('#d0d5e0').lineWidth(0.5).moveTo(40, fh).lineTo(555, fh).stroke();
       doc.font('Helvetica').fontSize(7).fillColor('#888').text(
@@ -1065,6 +1076,15 @@ app.use(cors({
   : '*',
 }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+// Middleware XML — doit être AVANT express.json()
+app.use((req, res, next) => {
+  const ct = req.headers['content-type'] || '';
+  if (req.path === '/api/cases/intake/xml' && (ct.includes('xml') || ct.includes('text/plain'))) {
+    let data = '';
+    req.on('data', chunk => data += chunk);
+    req.on('end', () => { req.body = data; next(); });
+  } else { next(); }
+});
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -1434,15 +1454,6 @@ app.post('/api/cases/intake/xml', async (req, res) => {
     console.error('[INTAKE_XML]', err.message);
     return res.status(500).json({ error: 'Erreur import XML', details: process.env.NODE_ENV==='development' ? err.message : undefined });
   }
-});
-
-// Middleware pour accepter XML content-type
-app.use((req, res, next) => {
-  if (req.path === '/api/cases/intake/xml' && (req.headers['content-type']?.includes('xml'))) {
-    let data = '';
-    req.on('data', chunk => data += chunk);
-    req.on('end', () => { req.body = data; next(); });
-  } else { next(); }
 });
 
 // ─── POST /api/cases/consolidate (F2 — Consolidation multi-sources) ─────────────
