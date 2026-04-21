@@ -1386,11 +1386,18 @@ app.post('/api/cases/intake/xml', async (req, res) => {
       return res.status(400).json({ error: 'XML E2B(R3) requis — body XML ou champ xml_content' });
     }
 
-    if (!xmlText.includes('ichicsr') && !xmlText.includes('safetyreport')) {
-      return res.status(422).json({ error: 'Format XML non reconnu — E2B(R3) ICH attendu' });
+    // Validation souple — accepter différents formats E2B
+    const xmlLower = xmlText.toLowerCase();
+    const isValidE2b = xmlLower.includes('ichicsr') || 
+                       xmlLower.includes('safetyreport') || 
+                       xmlLower.includes('medicinalproduct') ||
+                       xmlLower.includes('primarysourcereaction') ||
+                       (xmlLower.includes('<drug') && xmlLower.includes('<reaction'));
+    if (!isValidE2b) {
+      return res.status(422).json({ error: 'Format XML non reconnu — E2B(R3) ICH attendu (balises ichicsr, safetyreport, medicinalproduct)' });
     }
 
-    const orgId = req.body?.org_id || 'default';
+    const orgId = (typeof req.body === 'object' ? req.body?.org_id : null) || 'default';
 
     // Parser le XML E2B entrant
     const extracted = parseE2bXml(xmlText);
@@ -1718,12 +1725,25 @@ app.get('/api/cases/:id/export/pdf', async (req, res) => {
     const c = await dbGetCase(req.params.id);
     if (!c) return res.status(404).json({ error: 'Cas non trouvé' });
     const f = await dbGetFields(req.params.id);
-    const buf = await generateCiomsIPdf({ ...c, fields: f });
+    if (!f) return res.status(404).json({ error: 'Champs du cas introuvables' });
+
+    // Sanitiser les champs pour éviter les crashs PDFKit
+    const safeFields = {};
+    for (const [k, v] of Object.entries(f)) {
+      if (typeof v === 'string') {
+        // Remplacer caractères non supportés par PDFKit
+        safeFields[k] = v.replace(/[ --]/g, '').substring(0, 2000);
+      } else {
+        safeFields[k] = v;
+      }
+    }
+
+    const buf = await generateCiomsIPdf({ ...c, fields: safeFields });
     const name = `PharmaVeil_CIOMS-I_PV-${req.params.id.substring(0,8).toUpperCase()}_${new Date().toISOString().slice(0,10)}.pdf`;
     res.set({ 'Content-Type':'application/pdf', 'Content-Disposition':`attachment; filename="${name}"`, 'Content-Length': buf.length });
     return res.send(buf);
   } catch (err) {
-    console.error('[PDF]', err.message);
+    console.error('[PDF]', err.message, err.stack);
     return res.status(500).json({ error: 'Erreur génération PDF', details: err.message });
   }
 });
