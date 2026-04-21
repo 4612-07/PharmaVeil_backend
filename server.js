@@ -2275,6 +2275,365 @@ app.get('/api/mlm/batches/:id', async (req, res) => {
   }
 });
 
+
+// ═══════════════════════════════════════════════════════════════════
+//  REGINTEL — PharmaVeil Regulatory Intelligence
+// ═══════════════════════════════════════════════════════════════════
+
+// Sources réglementaires surveillées
+const REGINTEL_SOURCES = {
+  EMA: {
+    name: 'European Medicines Agency',
+    region: 'Europe',
+    url: 'https://www.ema.europa.eu/en/news/whats-new',
+    focus: ['GVP', 'pharmacovigilance', 'safety', 'guideline', 'ICSR'],
+    color: '#0066cc',
+  },
+  ANSM: {
+    name: 'Agence Nationale de Sécurité du Médicament',
+    region: 'France',
+    url: 'https://ansm.sante.fr/actualites',
+    focus: ['pharmacovigilance', 'sécurité', 'décision', 'guideline'],
+    color: '#003189',
+  },
+  FDA: {
+    name: 'Food and Drug Administration',
+    region: 'USA',
+    url: 'https://www.fda.gov/drugs/news-events-human-drugs',
+    focus: ['pharmacovigilance', 'safety', 'guidance', 'FAERS', 'MedWatch'],
+    color: '#cc0000',
+  },
+  SAHPRA: {
+    name: 'South African Health Products Regulatory Authority',
+    region: 'South Africa',
+    url: 'https://www.sahpra.org.za/news',
+    focus: ['pharmacovigilance', 'safety', 'guideline', 'circular'],
+    color: '#007a4d',
+  },
+  ICH: {
+    name: 'International Council for Harmonisation',
+    region: 'International',
+    url: 'https://www.ich.org/page/news',
+    focus: ['E2A', 'E2B', 'E2C', 'E2D', 'guideline', 'pharmacovigilance'],
+    color: '#6600cc',
+  },
+  MHRA: {
+    name: 'Medicines and Healthcare products Regulatory Agency',
+    region: 'UK',
+    url: 'https://www.gov.uk/drug-safety-update',
+    focus: ['pharmacovigilance', 'safety', 'yellow card', 'guideline'],
+    color: '#00205b',
+  },
+};
+
+// Table RegIntel
+async function _initRegIntelTable() {
+  const db = await getDb();
+  db.run(`
+    CREATE TABLE IF NOT EXISTS regintel_updates (
+      id TEXT PRIMARY KEY,
+      source_code TEXT NOT NULL,
+      source_name TEXT NOT NULL,
+      title TEXT NOT NULL,
+      url TEXT,
+      published_date TEXT,
+      raw_content TEXT,
+      summary TEXT,
+      impact_score TEXT DEFAULT 'info',
+      impact_reason TEXT,
+      keywords TEXT,
+      relevant_for TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS regintel_digests (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      week_start TEXT NOT NULL,
+      content TEXT,
+      updates_count INTEGER DEFAULT 0,
+      critical_count INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+  `);
+  _saveDb();
+}
+
+// Analyser un update réglementaire avec Claude
+async function analyzeRegulatoryUpdate(title, content, source) {
+  try {
+    const client = getAnthropicClient();
+    const prompt = [
+      "You are a senior pharmacovigilance regulatory expert.",
+      "Analyze this regulatory update and provide a structured assessment.",
+      "",
+      "SOURCE: " + source,
+      "TITLE: " + title,
+      "CONTENT: " + (content || title).substring(0, 3000),
+      "",
+      "Provide ONLY this JSON:",
+      JSON.stringify({
+        summary: "3-sentence plain language summary of what changed",
+        impact_score: "critical|important|info",
+        impact_reason: "Why this matters for PV teams in 1 sentence",
+        relevant_for: ["QPPV","DSO","regulatory_affairs","clinical_safety"],
+        keywords: ["keyword1","keyword2"],
+        action_required: "What PV teams should do now, or null if no action needed",
+        deadline: "deadline if applicable, or null",
+        affects_deadlines: false,
+        affects_meddra: false,
+        affects_e2b: false,
+      })
+    ].join("\n");
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 800,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    return _parseJson(response.content[0]?.text || '{}');
+  } catch (err) {
+    console.warn('[REGINTEL] Analysis failed:', err.message);
+    return {
+      summary: title,
+      impact_score: 'info',
+      impact_reason: 'Regulatory update',
+      relevant_for: ['QPPV'],
+      keywords: [],
+      action_required: null,
+      deadline: null,
+      affects_deadlines: false,
+      affects_meddra: false,
+      affects_e2b: false,
+    };
+  }
+}
+
+// POST /api/regintel/submit — Soumettre manuellement un update réglementaire
+app.post('/api/regintel/submit', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const { title, url, content, source_code, published_date } = req.body;
+    if (!title || !source_code) {
+      return res.status(400).json({ error: 'title et source_code requis' });
+    }
+    if (!REGINTEL_SOURCES[source_code.toUpperCase()]) {
+      return res.status(400).json({ error: 'source_code invalide. Options: ' + Object.keys(REGINTEL_SOURCES).join(', ') });
+    }
+
+    const source = REGINTEL_SOURCES[source_code.toUpperCase()];
+    const analysis = await analyzeRegulatoryUpdate(title, content, source.name);
+    const id = crypto.randomUUID();
+    const db = await getDb();
+
+    db.run(
+      'INSERT INTO regintel_updates (id,source_code,source_name,title,url,published_date,raw_content,summary,impact_score,impact_reason,keywords,relevant_for,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [id, source_code.toUpperCase(), source.name, title, url||null,
+       published_date || new Date().toISOString().slice(0,10),
+       (content||'').substring(0,5000),
+       analysis.summary, analysis.impact_score, analysis.impact_reason,
+       JSON.stringify(analysis.keywords || []),
+       JSON.stringify(analysis.relevant_for || []),
+       new Date().toISOString()]
+    );
+    _saveDb();
+
+    return res.status(201).json({
+      id, title, source: source.name,
+      impact_score: analysis.impact_score,
+      summary: analysis.summary,
+      impact_reason: analysis.impact_reason,
+      action_required: analysis.action_required,
+      affects_deadlines: analysis.affects_deadlines,
+      affects_e2b: analysis.affects_e2b,
+    });
+  } catch (err) {
+    console.error('[REGINTEL_SUBMIT]', err.message);
+    return res.status(500).json({ error: 'Erreur RegIntel', details: err.message });
+  }
+});
+
+// GET /api/regintel/updates — Feed des updates réglementaires
+app.get('/api/regintel/updates', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const { source, impact, limit = 20, offset = 0 } = req.query;
+    const db = await getDb();
+
+    let q = 'SELECT * FROM regintel_updates WHERE 1=1';
+    const params = [];
+    if (source) { q += ' AND source_code=?'; params.push(source.toUpperCase()); }
+    if (impact) { q += ' AND impact_score=?'; params.push(impact); }
+    q += ' ORDER BY published_date DESC, created_at DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit), parseInt(offset));
+
+    const stmt = db.prepare(q);
+    stmt.bind(params);
+    const rows = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      try { row.keywords = JSON.parse(row.keywords || '[]'); } catch { row.keywords = []; }
+      try { row.relevant_for = JSON.parse(row.relevant_for || '[]'); } catch { row.relevant_for = []; }
+      rows.push(row);
+    }
+    stmt.free();
+
+    return res.json({ updates: rows, total: rows.length });
+  } catch (err) {
+    return res.status(500).json({ error: 'Erreur RegIntel', details: err.message });
+  }
+});
+
+// GET /api/regintel/sources — Liste des sources surveillées
+app.get('/api/regintel/sources', (req, res) => {
+  const sources = Object.entries(REGINTEL_SOURCES).map(([code, s]) => ({
+    code, name: s.name, region: s.region, url: s.url, color: s.color,
+  }));
+  return res.json({ sources });
+});
+
+// POST /api/regintel/digest — Générer un digest hebdomadaire
+app.post('/api/regintel/digest', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const { org_id } = req.body;
+    const orgId = org_id || 'default';
+    const db = await getDb();
+
+    // Récupérer les updates de la semaine
+    const since = new Date(Date.now() - 7 * 86400000).toISOString();
+    const stmt = db.prepare('SELECT * FROM regintel_updates WHERE created_at>=? ORDER BY impact_score ASC, published_date DESC LIMIT 30');
+    stmt.bind([since]);
+    const updates = [];
+    while (stmt.step()) updates.push(stmt.getAsObject());
+    stmt.free();
+
+    if (updates.length === 0) {
+      return res.json({ message: 'Aucune mise à jour cette semaine', updates_count: 0 });
+    }
+
+    const critical = updates.filter(u => u.impact_score === 'critical');
+    const important = updates.filter(u => u.impact_score === 'important');
+    const info = updates.filter(u => u.impact_score === 'info');
+
+    // Générer le digest avec Claude
+    const client = getAnthropicClient();
+    const updatesText = updates.map(u => "- [" + u.impact_score.toUpperCase() + "] " + u.source_name + ": " + u.title + " — " + u.summary).join("\n");
+    const digestPrompt = "Generate a professional weekly pharmacovigilance regulatory intelligence digest in English.\n\n"
+      + "Updates this week:\n" + updatesText
+      + "\n\nWrite a 3-paragraph executive summary:\n"
+      + "1. Critical items requiring immediate action\n"
+      + "2. Important updates to be aware of\n"
+      + "3. Upcoming regulatory trends to monitor\n\n"
+      + "Keep it professional, concise, and actionable. No JSON.";
+
+    const digestResp = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 600,
+      messages: [{ role: 'user', content: digestPrompt }],
+    });
+
+    const digestContent = digestResp.content[0]?.text || '';
+    const digestId = crypto.randomUUID();
+    const weekStart = new Date(Date.now() - 7 * 86400000).toISOString().slice(0,10);
+
+    db.run(
+      'INSERT INTO regintel_digests (id,org_id,week_start,content,updates_count,critical_count,created_at) VALUES (?,?,?,?,?,?,?)',
+      [digestId, orgId, weekStart, digestContent, updates.length, critical.length, new Date().toISOString()]
+    );
+    _saveDb();
+
+    return res.json({
+      digest_id: digestId,
+      week_start: weekStart,
+      updates_count: updates.length,
+      critical_count: critical.length,
+      important_count: important.length,
+      info_count: info.length,
+      digest: digestContent,
+    });
+  } catch (err) {
+    console.error('[REGINTEL_DIGEST]', err.message);
+    return res.status(500).json({ error: 'Erreur digest', details: err.message });
+  }
+});
+
+// Seed initial — quelques updates réglementaires récents pour la démo
+async function _seedRegIntel() {
+  await _initRegIntelTable();
+  const db = await getDb();
+  const existing = db.prepare('SELECT COUNT(*) as c FROM regintel_updates').getAsObject([]);
+  if (existing.c > 0) return;
+
+  const seedUpdates = [
+    {
+      source_code: 'EMA',
+      title: 'GVP Module VI Revision 3 — Updated guidance on ICSR reporting timelines',
+      url: 'https://www.ema.europa.eu/en/documents/regulatory-procedural-guideline/guideline-good-pharmacovigilance-practices-gvp-module-vi-collection-management-submission-reports_en.pdf',
+      published_date: '2025-01-15',
+      content: 'The EMA has published Revision 3 of GVP Module VI clarifying the Day 0 definition for ICSR reporting. The revision confirms that the clock starts when any employee of the MAH becomes aware of the case, regardless of completeness. New guidance on electronic submissions via EudraVigilance gateway is included.',
+      impact_score: 'critical',
+      summary: 'EMA clarifies Day 0 definition — clock starts at first employee awareness. Electronic submission requirements updated for EudraVigilance.',
+      impact_reason: 'Directly impacts 7/15/90-day deadline calculations for all MAHs in Europe',
+    },
+    {
+      source_code: 'FDA',
+      title: 'FDA Updates MedWatch 3500A Form — New fields for biologics',
+      url: 'https://www.fda.gov/safety/medwatch-fda-safety-information-and-adverse-event-reporting-program',
+      published_date: '2025-02-03',
+      content: 'FDA has updated the MedWatch 3500A form to include new mandatory fields for biological products and biosimilars. The update introduces a new section for product lot number and expiry date. Effective date for mandatory compliance is Q3 2025.',
+      impact_score: 'important',
+      summary: 'MedWatch 3500A updated with new mandatory fields for biologics. Lot number and expiry date now required.',
+      impact_reason: 'MAHs with biologics or biosimilars must update their ICSR templates before Q3 2025',
+    },
+    {
+      source_code: 'ICH',
+      title: 'ICH E2B(R3) Implementation Working Group — New Q&A on XML validation',
+      url: 'https://www.ich.org/page/e2br3-implementation-working-group',
+      published_date: '2025-02-20',
+      content: 'The ICH E2B(R3) Implementation Working Group has published new Q&A clarifying XML validation requirements. The document addresses common errors in E2B(R3) submissions and provides guidance on handling missing mandatory elements.',
+      impact_score: 'important',
+      summary: 'New ICH Q&A clarifies E2B(R3) XML validation requirements and common submission errors.',
+      impact_reason: 'PV teams should review their XML generation process against the new Q&A to avoid rejection',
+    },
+    {
+      source_code: 'SAHPRA',
+      title: 'SAHPRA Circular — Mandatory VigiFlow registration for all MAHs by June 2025',
+      url: 'https://www.sahpra.org.za',
+      published_date: '2025-01-28',
+      content: 'SAHPRA has issued a circular requiring all Medicine Authorization Holders to register on VigiFlow for electronic ICSR submission by 30 June 2025. Paper submissions will no longer be accepted after this date.',
+      impact_score: 'critical',
+      summary: 'SAHPRA mandates VigiFlow registration for all MAHs by June 2025. Paper submissions discontinued.',
+      impact_reason: 'MAHs operating in South Africa must register on VigiFlow immediately to avoid non-compliance',
+    },
+    {
+      source_code: 'ANSM',
+      title: 'ANSM — Mise à jour des exigences de déclaration pour les médicaments génériques',
+      url: 'https://ansm.sante.fr',
+      published_date: '2025-03-01',
+      content: "L'ANSM a publié une mise à jour des exigences de déclaration des effets indésirables pour les médicaments génériques. Les délais de soumission restent inchangés mais les critères de validité sont précisés pour les médicaments à base de plantes.",
+      impact_score: 'info',
+      summary: "L'ANSM précise les critères de validité des ICSRs pour les médicaments à base de plantes. Délais inchangés.",
+      impact_reason: 'MAHs avec des produits à base de plantes doivent vérifier leurs procédures de collecte',
+    },
+  ];
+
+  for (const u of seedUpdates) {
+    const id = crypto.randomUUID();
+    db.run(
+      'INSERT OR IGNORE INTO regintel_updates (id,source_code,source_name,title,url,published_date,raw_content,summary,impact_score,impact_reason,keywords,relevant_for,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [id, u.source_code, REGINTEL_SOURCES[u.source_code].name, u.title, u.url||null,
+       u.published_date, u.content, u.summary, u.impact_score, u.impact_reason,
+       '[]', '["QPPV","DSO"]', new Date().toISOString()]
+    );
+  }
+  _saveDb();
+  console.log('[REGINTEL] Seed completed —', seedUpdates.length, 'updates');
+}
+
+// Initialiser RegIntel au démarrage
+_seedRegIntel().catch(err => console.warn('[REGINTEL_SEED]', err.message));
+
 // ─── 404 + Error handler ──────────────────────────────────────────────────────
 
 app.use((req, res) =>
