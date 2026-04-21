@@ -1101,6 +1101,33 @@ const upload = multer({
   },
 });
 
+// ─── Auth — Codes d'accès beta ───────────────────────────────────────────────
+
+const ACCESS_CODES = {
+  'PV-DEMO-2026':       { org_id: 'demo',        org_name: 'PharmaVeil Demo',           role: 'demo' },
+  'PV-ENOVALIFE-2026':  { org_id: 'enovalife',   org_name: 'Enovalife',                 role: 'beta' },
+  'PV-DELITYS-2026':    { org_id: 'delitys',     org_name: 'DELITYS Conseil',            role: 'beta' },
+  'PV-EXCELYA-2026':    { org_id: 'excelya',     org_name: 'Excelya',                   role: 'beta' },
+  'PV-NOVAGEN-2026':    { org_id: 'novagen',     org_name: 'Novagen South Africa',       role: 'beta' },
+  'PV-BIOVAC-2026':     { org_id: 'biovac',      org_name: 'Biovac Institute',           role: 'beta' },
+  'PV-ROCHE-SA-2026':   { org_id: 'roche_sa',    org_name: 'Roche South Africa',        role: 'beta' },
+  'PV-ADMIN-2026':      { org_id: 'pharmaveil',  org_name: 'PharmaVeil Admin',           role: 'admin' },
+};
+
+app.post('/api/auth/login', (req, res) => {
+  const { access_code } = req.body;
+  if (!access_code) return res.status(400).json({ error: 'Code requis' });
+  const org = ACCESS_CODES[access_code.toUpperCase()];
+  if (!org) return res.status(401).json({ error: 'Code invalide' });
+  return res.json({
+    success: true,
+    org_id: org.org_id,
+    org_name: org.org_name,
+    role: org.role,
+    message: `Bienvenue ${org.org_name}`,
+  });
+});
+
 // ─── Health ──────────────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) =>
