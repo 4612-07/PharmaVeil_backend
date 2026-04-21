@@ -1971,6 +1971,310 @@ app.get('/api/cases/:id/export/e2b', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+//  MLM — Screening Littérature (Literature Monitoring)
+// ═══════════════════════════════════════════════════════════════════
+
+// Table MLM — créer si inexistante
+async function _initMlmTable() {
+  const db = await getDb();
+  db.run(`
+    CREATE TABLE IF NOT EXISTS mlm_batches (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      molecule TEXT,
+      keywords TEXT,
+      articles_submitted INTEGER DEFAULT 0,
+      articles_relevant INTEGER DEFAULT 0,
+      cases_detected INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'processing',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mlm_articles (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      title TEXT,
+      content TEXT,
+      relevant INTEGER DEFAULT 0,
+      relevance_score REAL DEFAULT 0,
+      relevance_reason TEXT,
+      cases_count INTEGER DEFAULT 0,
+      cases_extracted TEXT,
+      processed_at TEXT,
+      FOREIGN KEY (batch_id) REFERENCES mlm_batches(id)
+    );
+  `);
+  _saveDb();
+}
+
+// Analyser un article pour détecter des cas PV
+async function analyzeArticleForPV(articleText, molecule, keywords) {
+  const client = getAnthropicClient();
+
+  const molTarget = molecule || "toute molecule";
+  const kwTarget = keywords || "effets indesirables, adverse event, adverse drug reaction";
+  const articleSnippet = articleText.substring(0, 6000);
+  const prompt = [
+    "Tu es un expert en pharmacovigilance specialise dans le Medical Literature Monitoring (MLM) selon GVP Module VI.",
+    "",
+    "MISSION : Analyser cet article scientifique pour detecter des cas de pharmacovigilance valides.",
+    "",
+    "MOLECULE CIBLE : " + molTarget,
+    "MOTS-CLES : " + kwTarget,
+    "",
+    "ARTICLE :",
+    articleSnippet,
+    "",
+    "CRITERES CAS VALIDE (ICH E2A) :",
+    "1. Patient identifiable (age, sexe ou initiales)",
+    "2. Rapporteur identifiable (auteur, medecin)",
+    "3. Medicament suspect mentionne",
+    "4. Effet indesirable decrit",
+    "",
+    'Reponds UNIQUEMENT avec ce JSON :',
+    '{"relevant":false,"relevance_score":0.0,"relevance_reason":"","cases_count":0,"cases":[]}',
+    "",
+    "Si relevant=true, inclure dans cases[] :",
+    '[{"patient_age":null,"patient_sex":null,"drug_name":null,"drug_dose":null,"adr_description":null,"adr_outcome":null,"reporter_name":null,"meddra_term":null,"seriousness":"non-serious"}]',
+  ].join("\n");
+
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1500,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const raw = response.content[0]?.text || '{}';
+  return _parseJson(raw);
+}
+
+// POST /api/mlm/screen — Soumettre un lot d'articles
+app.post('/api/mlm/screen', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    await _initMlmTable();
+    const { articles, molecule, keywords, org_id } = req.body;
+
+    if (!Array.isArray(articles) || articles.length === 0) {
+      return res.status(400).json({ error: 'articles[] requis — array de {title, content}' });
+    }
+    if (articles.length > 50) {
+      return res.status(400).json({ error: 'Maximum 50 articles par batch' });
+    }
+
+    const orgId = org_id || 'default';
+    const batchId = crypto.randomUUID();
+    const db = await getDb();
+
+    // Créer le batch
+    db.run(
+      'INSERT INTO mlm_batches (id,org_id,molecule,keywords,articles_submitted,status,created_at) VALUES (?,?,?,?,?,?,?)',
+      [batchId, orgId, molecule||null, keywords||null, articles.length, 'processing', new Date().toISOString()]
+    );
+    _saveDb();
+
+    // Analyser chaque article en parallèle (max 5 simultanés)
+    let relevantCount = 0;
+    let casesCount = 0;
+    const results = [];
+
+    for (let i = 0; i < articles.length; i += 5) {
+      const batch = articles.slice(i, i + 5);
+      const batchResults = await Promise.all(batch.map(async (article) => {
+        const articleId = crypto.randomUUID();
+        let analysis = { relevant: false, relevance_score: 0, relevance_reason: 'Erreur analyse', cases_count: 0, cases: [] };
+
+        try {
+          analysis = await analyzeArticleForPV(article.content || article.text || '', molecule, keywords);
+        } catch (err) {
+          console.warn('[MLM] Article analysis failed:', err.message);
+        }
+
+        db.run(
+          'INSERT INTO mlm_articles (id,batch_id,title,content,relevant,relevance_score,relevance_reason,cases_count,cases_extracted,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+          [articleId, batchId, article.title||'Sans titre', (article.content||'').substring(0,5000),
+           analysis.relevant?1:0, analysis.relevance_score||0, analysis.relevance_reason||'',
+           analysis.cases_count||0, analysis.cases?.length>0?JSON.stringify(analysis.cases):null,
+           new Date().toISOString()]
+        );
+        _saveDb();
+
+        if (analysis.relevant) { relevantCount++; casesCount += analysis.cases_count||0; }
+
+        return {
+          article_id: articleId,
+          title: article.title || 'Sans titre',
+          relevant: analysis.relevant,
+          relevance_score: analysis.relevance_score,
+          relevance_reason: analysis.relevance_reason,
+          cases_count: analysis.cases_count || 0,
+          cases: analysis.cases || [],
+        };
+      }));
+      results.push(...batchResults);
+    }
+
+    // Mettre à jour le batch
+    db.run(
+      'UPDATE mlm_batches SET articles_relevant=?,cases_detected=?,status=? WHERE id=?',
+      [relevantCount, casesCount, 'completed', batchId]
+    );
+    _saveDb();
+
+    return res.status(201).json({
+      batch_id: batchId,
+      status: 'completed',
+      molecule,
+      keywords,
+      stats: {
+        submitted: articles.length,
+        relevant: relevantCount,
+        not_relevant: articles.length - relevantCount,
+        cases_detected: casesCount,
+        detection_rate: Math.round((relevantCount / articles.length) * 100) + '%',
+      },
+      articles: results,
+      processing_ms: Date.now() - t0,
+    });
+  } catch (err) {
+    console.error('[MLM_SCREEN]', err.message);
+    return res.status(500).json({ error: 'Erreur screening', details: err.message });
+  }
+});
+
+// POST /api/mlm/import-cases — Importer les cas détectés dans PharmaVeil
+app.post('/api/mlm/import-cases', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    await _initMlmTable();
+    const { batch_id, article_ids, org_id } = req.body;
+    if (!batch_id) return res.status(400).json({ error: 'batch_id requis' });
+
+    const orgId = org_id || 'default';
+    const db = await getDb();
+
+    // Récupérer les articles du batch avec des cas
+    let query = 'SELECT * FROM mlm_articles WHERE batch_id=? AND relevant=1 AND cases_extracted IS NOT NULL';
+    const params = [batch_id];
+    if (article_ids?.length > 0) {
+      query += ' AND id IN (' + article_ids.map(() => '?').join(',') + ')';
+      params.push(...article_ids);
+    }
+
+    const stmt = db.prepare(query);
+    stmt.bind(params);
+    const articles = [];
+    while (stmt.step()) articles.push(stmt.getAsObject());
+    stmt.free();
+
+    if (articles.length === 0) {
+      return res.status(404).json({ error: 'Aucun article avec des cas trouvé' });
+    }
+
+    const importedCases = [];
+
+    for (const article of articles) {
+      let cases = [];
+      try { cases = JSON.parse(article.cases_extracted || '[]'); } catch {}
+
+      for (const c of cases) {
+        const caseId = crypto.randomUUID();
+        const deadlines = _calcDeadlines(
+          c.seriousness && c.seriousness !== 'non-serious',
+          []
+        );
+
+        await dbInsertCase({
+          id: caseId, orgId, status: 'pending_validation',
+          sourceType: 'literature_mlm',
+          rawContent: ('Article: ' + (article.title||'') + ' | ' + (article.content||'').substring(0,1000)),
+          receivedAt: new Date().toISOString(),
+          deadline7:  deadlines.deadline7?.toISOString()  || null,
+          deadline15: deadlines.deadline15?.toISOString() || null,
+          deadline90: deadlines.deadline90?.toISOString() || null,
+          seriousness: c.seriousness || 'non-serious',
+          reportType: 'literature',
+          reporterQualification: 'author',
+        });
+
+        // Générer narrative
+        let narrative = null;
+        try { narrative = await generateNarrative({ ...c, reporterType: 'author' }); } catch {}
+
+        await dbInsertFields({
+          id: crypto.randomUUID(), caseId,
+          patientAge: c.patient_age, patientSex: c.patient_sex,
+          reporterName: c.reporter_name || article.title,
+          reporterType: 'author',
+          drugName: c.drug_name, drugDose: c.drug_dose,
+          adrDescription: c.adr_description,
+          adrOutcome: c.adr_outcome,
+          seriousness: c.seriousness || 'non-serious',
+          meddraSearchTerm: c.meddra_term || c.adr_description,
+          narrative,
+          confidenceScore: 0.75,
+          confidenceFlag: 'orange',
+          gvpValid: !!(c.drug_name && c.adr_description),
+          rawLlmOutput: null,
+        });
+
+        await dbInsertAudit(caseId, 'case_created_mlm', 'system');
+        importedCases.push({ case_id: caseId, drug: c.drug_name, adr: c.adr_description });
+      }
+    }
+
+    return res.status(201).json({
+      imported: importedCases.length,
+      cases: importedCases,
+      processing_ms: Date.now() - t0,
+    });
+  } catch (err) {
+    console.error('[MLM_IMPORT]', err.message);
+    return res.status(500).json({ error: 'Erreur import cas', details: err.message });
+  }
+});
+
+// GET /api/mlm/batches — Historique des batches MLM
+app.get('/api/mlm/batches', async (req, res) => {
+  try {
+    await _initMlmTable();
+    const { org_id } = req.query;
+    const db = await getDb();
+    const stmt = db.prepare(
+      'SELECT * FROM mlm_batches WHERE org_id=? ORDER BY created_at DESC LIMIT 20'
+    );
+    stmt.bind([org_id || 'default']);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    return res.json({ batches: rows, total: rows.length });
+  } catch (err) {
+    return res.status(500).json({ error: 'Erreur MLM', details: err.message });
+  }
+});
+
+// GET /api/mlm/batches/:id — Détail d'un batch
+app.get('/api/mlm/batches/:id', async (req, res) => {
+  try {
+    await _initMlmTable();
+    const db = await getDb();
+    const batchStmt = db.prepare('SELECT * FROM mlm_batches WHERE id=?');
+    const batch = batchStmt.getAsObject([req.params.id]);
+    batchStmt.free();
+    if (!batch.id) return res.status(404).json({ error: 'Batch non trouvé' });
+
+    const artStmt = db.prepare('SELECT * FROM mlm_articles WHERE batch_id=? ORDER BY relevance_score DESC');
+    artStmt.bind([req.params.id]);
+    const articles = [];
+    while (artStmt.step()) articles.push(artStmt.getAsObject());
+    artStmt.free();
+
+    return res.json({ ...batch, articles });
+  } catch (err) {
+    return res.status(500).json({ error: 'Erreur MLM', details: err.message });
+  }
+});
+
 // ─── 404 + Error handler ──────────────────────────────────────────────────────
 
 app.use((req, res) =>
