@@ -1264,16 +1264,72 @@ app.post('/api/cases/intake', async (req, res) => {
 // ─── POST /api/cases/intake/pdf ───────────────────────────────────────────────
 
 app.post('/api/cases/intake/pdf', upload.single('file'), async (req, res) => {
+  const t0 = Date.now();
   try {
     if (!req.file) return res.status(400).json({ error: 'Fichier PDF requis (champ: file)' });
+
     let pdfText;
-    try { const d = await pdfParse(req.file.buffer); pdfText = d.text; }
-    catch { return res.status(422).json({ error: 'PDF illisible ou protégé' }); }
+    try {
+      const d = await pdfParse(req.file.buffer);
+      pdfText = d.text;
+    } catch (parseErr) {
+      console.error('[PDF_INTAKE] pdf-parse error:', parseErr.message);
+      return res.status(422).json({ error: 'PDF illisible ou protégé', details: parseErr.message });
+    }
+
     if (!pdfText?.trim() || pdfText.trim().length < 30)
-      return res.status(422).json({ error: 'PDF vide ou non-textuel' });
-    req.body = { source_type: 'manual', manual_text: pdfText, org_id: req.body?.org_id };
-    return app._router.handle(req, res, () => {});
-  } catch (err) { return res.status(500).json({ error: 'Erreur PDF', details: err.message }); }
+      return res.status(422).json({ error: 'PDF vide ou non-textuel (< 30 caractères extraits)' });
+
+    const orgId = req.body?.org_id || 'default';
+    const reportType = req.body?.report_type || 'spontaneous';
+    const reporterQualification = req.body?.reporter_qualification || null;
+
+    const normalized = normalizeSource(pdfText, 'pdf');
+    const cv = validateSource(normalized);
+    if (!cv.valid) return res.status(422).json({ error: cv.reason });
+
+    const { extracted, deadlines } = await extractIcsrData(normalized, 'pdf');
+    const caseId = crypto.randomUUID();
+
+    await dbInsertCase({
+      id: caseId, orgId, status: 'pending_validation', sourceType: 'pdf',
+      rawContent: pdfText.substring(0, 50000),
+      receivedAt: new Date().toISOString(),
+      deadline7:  deadlines.deadline7?.toISOString()  || null,
+      deadline15: deadlines.deadline15?.toISOString() || null,
+      deadline90: deadlines.deadline90?.toISOString() || null,
+      seriousness: extracted.seriousness,
+      reportType, reporterQualification,
+    });
+    await dbInsertFields({ id: crypto.randomUUID(), caseId, ...extracted });
+    await dbInsertAlerts(caseId, deadlines);
+    await dbInsertAudit(caseId, 'case_created_pdf', req.ip);
+
+    let duplicateInfo = { isDuplicate: false, duplicateCaseId: null };
+    try {
+      const recent = await dbGetRecentFields(orgId, caseId);
+      duplicateInfo = await checkDuplicate(extracted, recent);
+      if (duplicateInfo.isDuplicate) {
+        const db = await getDb();
+        db.run('UPDATE icsr_cases SET duplicate_flag=1 WHERE id=?', [caseId]);
+        _saveDb();
+      }
+    } catch {}
+
+    return res.status(201).json({
+      case_id: caseId,
+      status: 'pending_validation',
+      source_type: 'pdf',
+      processing_ms: Date.now() - t0,
+      narrative_generated: !!extracted.narrative,
+      gvp_valid: extracted.gvpValid,
+      seriousness: extracted.seriousness,
+      duplicate_flag: duplicateInfo.isDuplicate,
+    });
+  } catch (err) {
+    console.error('[PDF_INTAKE]', err.message, err.stack);
+    return res.status(500).json({ error: 'Erreur traitement PDF', details: err.message });
+  }
 });
 
 // ─── POST /api/cases/intake/xml (F1 — Import E2B R3) ─────────────────────────
