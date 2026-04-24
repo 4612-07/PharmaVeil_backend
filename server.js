@@ -2539,8 +2539,19 @@ async function analyzeRegulatoryUpdate(title, content, source) {
   }
 }
 
+// ─── Middleware admin pour RegIntel ──────────────────────────────────────────
+function requireAdmin(req, res, next) {
+  const orgId = req.query.org_id || req.body?.org_id || 'default';
+  // Trouver le role de l'org
+  const entry = Object.values(ACCESS_CODES).find(c => c.org_id === orgId);
+  if (!entry || entry.role !== 'admin') {
+    return res.status(403).json({ error: 'Accès restreint — module RegIntel réservé aux administrateurs' });
+  }
+  next();
+}
+
 // POST /api/regintel/submit — Soumettre manuellement un update réglementaire
-app.post('/api/regintel/submit', async (req, res) => {
+app.post('/api/regintel/submit', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { title, url, content, source_code, published_date } = req.body;
@@ -2584,7 +2595,7 @@ app.post('/api/regintel/submit', async (req, res) => {
 });
 
 // GET /api/regintel/updates — Feed des updates réglementaires
-app.get('/api/regintel/updates', async (req, res) => {
+app.get('/api/regintel/updates', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { source, impact, limit = 20, offset = 0 } = req.query;
@@ -2615,7 +2626,7 @@ app.get('/api/regintel/updates', async (req, res) => {
 });
 
 // GET /api/regintel/sources — Liste des sources surveillées
-app.get('/api/regintel/sources', (req, res) => {
+app.get('/api/regintel/sources', requireAdmin, (req, res) => {
   const sources = Object.entries(REGINTEL_SOURCES).map(([code, s]) => ({
     code, name: s.name, region: s.region, url: s.url, color: s.color,
   }));
@@ -2623,7 +2634,7 @@ app.get('/api/regintel/sources', (req, res) => {
 });
 
 // POST /api/regintel/digest — Générer un digest hebdomadaire
-app.post('/api/regintel/digest', async (req, res) => {
+app.post('/api/regintel/digest', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { org_id } = req.body;
@@ -2769,7 +2780,7 @@ _seedRegIntel().catch(err => console.warn('[REGINTEL_SEED]', err.message));
 // ═══════════════════════════════════════════════════════════════════
 
 // ─── GET /api/regintel/profile — profil réglementaire org ─────────────────────
-app.get('/api/regintel/profile', async (req, res) => {
+app.get('/api/regintel/profile', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const orgId = req.query.org_id || 'default';
@@ -2796,7 +2807,7 @@ app.get('/api/regintel/profile', async (req, res) => {
 });
 
 // ─── POST /api/regintel/profile — sauvegarder profil ─────────────────────────
-app.post('/api/regintel/profile', async (req, res) => {
+app.post('/api/regintel/profile', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { org_id='default', countries=[], vigilance_types=['pv'],
@@ -2821,7 +2832,7 @@ app.post('/api/regintel/profile', async (req, res) => {
 });
 
 // ─── GET /api/regintel/tasks — liste des tâches Kanban ────────────────────────
-app.get('/api/regintel/tasks', async (req, res) => {
+app.get('/api/regintel/tasks', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const orgId = req.query.org_id || 'default';
@@ -2847,7 +2858,7 @@ app.get('/api/regintel/tasks', async (req, res) => {
 });
 
 // ─── POST /api/regintel/tasks — créer une tâche depuis une alerte ─────────────
-app.post('/api/regintel/tasks', async (req, res) => {
+app.post('/api/regintel/tasks', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { org_id='default', update_id, title, description, priority='important',
@@ -2868,7 +2879,7 @@ app.post('/api/regintel/tasks', async (req, res) => {
 });
 
 // ─── PATCH /api/regintel/tasks/:id — mettre à jour statut Kanban ──────────────
-app.patch('/api/regintel/tasks/:id', async (req, res) => {
+app.patch('/api/regintel/tasks/:id', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { id } = req.params;
@@ -2897,7 +2908,7 @@ app.patch('/api/regintel/tasks/:id', async (req, res) => {
 });
 
 // ─── GET /api/regintel/tasks/:id/audit — piste d'audit d'une tâche ────────────
-app.get('/api/regintel/tasks/:id/audit', async (req, res) => {
+app.get('/api/regintel/tasks/:id/audit', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const db = await getDb();
@@ -2949,7 +2960,7 @@ app.post('/api/regintel/ingest/pdf', uploadRegIntel.single('file'), async (req, 
 });
 
 // ─── PATCH /api/regintel/updates/:id/status — marquer comme lu ────────────────
-app.patch('/api/regintel/updates/:id/status', async (req, res) => {
+app.patch('/api/regintel/updates/:id/status', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { status='read' } = req.body;
@@ -2963,7 +2974,7 @@ app.patch('/api/regintel/updates/:id/status', async (req, res) => {
 });
 
 // ─── GET /api/regintel/report — rapport d'inspection PDF ──────────────────────
-app.get('/api/regintel/report', async (req, res) => {
+app.get('/api/regintel/report', requireAdmin, async (req, res) => {
   try {
     await _initRegIntelTable();
     const orgId = req.query.org_id || 'default';
