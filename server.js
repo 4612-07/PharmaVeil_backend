@@ -2243,7 +2243,15 @@ app.post('/api/mlm/screen', async (req, res) => {
           'INSERT INTO mlm_articles (id,batch_id,title,content,relevant,relevance_score,relevance_reason,cases_count,cases_extracted,processed_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
           [articleId, batchId, article.title||'Sans titre', (article.content||'').substring(0,5000),
            analysis.relevant?1:0, analysis.relevance_score||0, analysis.relevance_reason||'',
-           analysis.cases_count||0, analysis.cases?.length>0?JSON.stringify(analysis.cases):null,
+           analysis.cases_count||0,
+           // Stocker cases même si tableau vide — fallback: créer 1 case depuis le contenu brut
+           JSON.stringify(analysis.cases?.length>0 ? analysis.cases : (analysis.relevant ? [{
+             patient_age: null, patient_sex: null,
+             drug_name: molecule || null,
+             adr_description: (article.content||'').substring(0,300),
+             adr_outcome: 'unknown', seriousness: 'serious',
+             reporter_name: article.title || 'MLM', meddra_term: keywords||null,
+           }] : [])),
            new Date().toISOString()]
         );
         _saveDb();
@@ -2303,7 +2311,7 @@ app.post('/api/mlm/import-cases', async (req, res) => {
     const db = await getDb();
 
     // Récupérer les articles du batch avec des cas
-    let query = 'SELECT * FROM mlm_articles WHERE batch_id=? AND relevant=1 AND cases_extracted IS NOT NULL';
+    let query = 'SELECT * FROM mlm_articles WHERE batch_id=? AND relevant=1';
     const params = [batch_id];
     if (article_ids?.length > 0) {
       query += ' AND id IN (' + article_ids.map(() => '?').join(',') + ')';
@@ -2324,7 +2332,24 @@ app.post('/api/mlm/import-cases', async (req, res) => {
 
     for (const article of articles) {
       let cases = [];
-      try { cases = JSON.parse(article.cases_extracted || '[]'); } catch {}
+      try {
+        const parsed = JSON.parse(article.cases_extracted || '[]');
+        cases = Array.isArray(parsed) ? parsed : [];
+      } catch {}
+
+      // Fallback : si cases vide mais article relevant, créer 1 case basique
+      if (cases.length === 0 && article.relevant) {
+        cases = [{
+          patient_age: null, patient_sex: null,
+          drug_name: req.body?.molecule || null,
+          adr_description: (article.content || '').substring(0, 400),
+          adr_outcome: 'unknown', seriousness: 'serious',
+          reporter_name: article.title || 'MLM import',
+          meddra_term: null,
+        }];
+      }
+
+      if (cases.length === 0) continue;
 
       for (const c of cases) {
         const caseId = crypto.randomUUID();
