@@ -1606,15 +1606,6 @@ app.post('/api/cases/intake/xml', async (req, res) => {
       confidence_flag: extracted.confidenceFlag || 'red',
       gvp_valid: extracted.gvpValid || false,
       duplicate_flag: duplicateInfo.isDuplicate,
-    });!extracted.narrative,
-      duplicate_flag: duplicateInfo.isDuplicate,
-      gvp_valid: extracted.gvpValid,
-      seriousness: extracted.seriousness,
-      deadlines: {
-        deadline_7:  deadlines.deadline7?.toISOString()  || null,
-        deadline_15: deadlines.deadline15?.toISOString() || null,
-        deadline_90: deadlines.deadline90?.toISOString() || null,
-      },
     });
   } catch (err) {
     console.error('[INTAKE_XML]', err.message);
