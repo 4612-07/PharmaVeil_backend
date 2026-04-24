@@ -2827,18 +2827,20 @@ async function _seedRegIntel() {
   await _initRegIntelTable();
   const db = await getDb();
   const existing = db.prepare('SELECT COUNT(*) as c FROM regintel_updates').getAsObject([]);
-  if (existing.c > 0) return;
+  // Re-seed si moins de 10 entrées (nouveau seed enrichi avec 4 types)
+  if (existing.c >= 10) return;
 
   const seedUpdates = [
     {
       source_code: 'EMA',
       title: 'GVP Module VI Revision 3 — Updated guidance on ICSR reporting timelines',
-      url: 'https://www.ema.europa.eu/en/documents/regulatory-procedural-guideline/guideline-good-pharmacovigilance-practices-gvp-module-vi-collection-management-submission-reports_en.pdf',
+      url: 'https://www.ema.europa.eu/en/documents/regulatory-procedural-guideline/guideline-good-pharmacovigilance-practices-gvp-module-vi',
       published_date: '2025-01-15',
       content: 'The EMA has published Revision 3 of GVP Module VI clarifying the Day 0 definition for ICSR reporting. The revision confirms that the clock starts when any employee of the MAH becomes aware of the case, regardless of completeness. New guidance on electronic submissions via EudraVigilance gateway is included.',
-      impact_score: 'critical',
+      impact_score: 'critical', vigilance_type: 'pv',
       summary: 'EMA clarifies Day 0 definition — clock starts at first employee awareness. Electronic submission requirements updated for EudraVigilance.',
       impact_reason: 'Directly impacts 7/15/90-day deadline calculations for all MAHs in Europe',
+      impact_action: '→ Vérifier immédiatement vos procédures de datation J0 — tout employé informé du cas déclenche le délai, même sans rapport complet.',
     },
     {
       source_code: 'FDA',
@@ -2846,9 +2848,10 @@ async function _seedRegIntel() {
       url: 'https://www.fda.gov/safety/medwatch-fda-safety-information-and-adverse-event-reporting-program',
       published_date: '2025-02-03',
       content: 'FDA has updated the MedWatch 3500A form to include new mandatory fields for biological products and biosimilars. The update introduces a new section for product lot number and expiry date. Effective date for mandatory compliance is Q3 2025.',
-      impact_score: 'important',
+      impact_score: 'important', vigilance_type: 'pv',
       summary: 'MedWatch 3500A updated with new mandatory fields for biologics. Lot number and expiry date now required.',
       impact_reason: 'MAHs with biologics or biosimilars must update their ICSR templates before Q3 2025',
+      impact_action: '→ Mettre à jour les formulaires ICSR pour les biologiques avant Q3 2025 — ajouter numéro de lot et date de péremption.',
     },
     {
       source_code: 'ICH',
@@ -2856,9 +2859,10 @@ async function _seedRegIntel() {
       url: 'https://www.ich.org/page/e2br3-implementation-working-group',
       published_date: '2025-02-20',
       content: 'The ICH E2B(R3) Implementation Working Group has published new Q&A clarifying XML validation requirements. The document addresses common errors in E2B(R3) submissions and provides guidance on handling missing mandatory elements.',
-      impact_score: 'important',
+      impact_score: 'important', vigilance_type: 'pv',
       summary: 'New ICH Q&A clarifies E2B(R3) XML validation requirements and common submission errors.',
       impact_reason: 'PV teams should review their XML generation process against the new Q&A to avoid rejection',
+      impact_action: null,
     },
     {
       source_code: 'SAHPRA',
@@ -2866,9 +2870,10 @@ async function _seedRegIntel() {
       url: 'https://www.sahpra.org.za',
       published_date: '2025-01-28',
       content: 'SAHPRA has issued a circular requiring all Medicine Authorization Holders to register on VigiFlow for electronic ICSR submission by 30 June 2025. Paper submissions will no longer be accepted after this date.',
-      impact_score: 'critical',
+      impact_score: 'critical', vigilance_type: 'pv',
       summary: 'SAHPRA mandates VigiFlow registration for all MAHs by June 2025. Paper submissions discontinued.',
       impact_reason: 'MAHs operating in South Africa must register on VigiFlow immediately to avoid non-compliance',
+      impact_action: '→ S\'inscrire sur VigiFlow avant le 30 juin 2025. Les soumissions papier ne seront plus acceptées après cette date.',
     },
     {
       source_code: 'ANSM',
@@ -2876,18 +2881,90 @@ async function _seedRegIntel() {
       url: 'https://ansm.sante.fr',
       published_date: '2025-03-01',
       content: "L'ANSM a publié une mise à jour des exigences de déclaration des effets indésirables pour les médicaments génériques. Les délais de soumission restent inchangés mais les critères de validité sont précisés pour les médicaments à base de plantes.",
-      impact_score: 'info',
+      impact_score: 'info', vigilance_type: 'pv',
       summary: "L'ANSM précise les critères de validité des ICSRs pour les médicaments à base de plantes. Délais inchangés.",
       impact_reason: 'MAHs avec des produits à base de plantes doivent vérifier leurs procédures de collecte',
+      impact_action: null,
+    },
+    // ── MATÉRIOVIGILANCE ──────────────────────────────────────────────────────
+    {
+      source_code: 'ANSM',
+      title: 'ANSM — Nouvelle obligation de déclaration des incidents de matériovigilance via SIGNALEMENT.SOCIAL.GOUV.FR',
+      url: 'https://ansm.sante.fr/dispositifs-medicaux/materiovigilance',
+      published_date: '2025-02-10',
+      content: "L'ANSM impose à partir du 1er avril 2025 la déclaration obligatoire de tous les incidents graves de matériovigilance via la plateforme nationale signalement.social.gouv.fr. Les déclarations papier ne seront plus acceptées. Les délais restent inchangés : 15 jours pour les incidents graves.",
+      impact_score: 'critical', vigilance_type: 'materio',
+      summary: "Déclaration matériovigilance obligatoire via plateforme numérique à partir d'avril 2025. Fin des formulaires papier.",
+      impact_reason: 'Tous les fabricants et distributeurs de DM en France doivent migrer vers la plateforme numérique',
+      impact_action: '→ Créer un compte sur signalement.social.gouv.fr avant le 1er avril 2025 et former les équipes à la nouvelle plateforme.',
+    },
+    {
+      source_code: 'EMA',
+      title: 'EUDAMED — Activation du module vigilance des dispositifs médicaux (MDR Article 87)',
+      url: 'https://ec.europa.eu/tools/eudamed',
+      published_date: '2025-01-20',
+      content: 'The European Commission has confirmed that the EUDAMED vigilance module (MDR Article 87) becomes mandatory for all medical device manufacturers from March 2025. All serious incidents must be reported electronically via EUDAMED. National competent authorities will receive automatic notifications.',
+      impact_score: 'critical', vigilance_type: 'materio',
+      summary: 'Module vigilance EUDAMED obligatoire pour tous les fabricants de DM à partir de mars 2025. Déclaration électronique via EUDAMED requise.',
+      impact_reason: 'Tous les fabricants de DM commercialisés en Europe doivent activer leur compte EUDAMED pour la vigilance',
+      impact_action: '→ Activer le module vigilance EUDAMED et tester la soumission avant mars 2025. Délai : 15 jours incidents graves, 2 jours incidents avec risque de décès.',
+    },
+    // ── NUTRIVIGILANCE ────────────────────────────────────────────────────────
+    {
+      source_code: 'ANSM',
+      title: 'ANSES — Bilan nutrivigilance 2024 : augmentation des signalements liés aux compléments alimentaires sportifs',
+      url: 'https://www.anses.fr/fr/content/nutrivigilance',
+      published_date: '2025-03-15',
+      content: "L'ANSES publie son bilan annuel de nutrivigilance 2024. Une augmentation de 34% des signalements liés aux compléments alimentaires sportifs (créatine, BCAA, pré-workout) est observée. Les effets cardiovasculaires et hépatiques sont les plus fréquemment rapportés. L'ANSES rappelle l'obligation de déclaration sous 15 jours pour les effets graves.",
+      impact_score: 'important', vigilance_type: 'nutri',
+      summary: 'ANSES : +34% de signalements pour compléments sportifs en 2024. Effets cardiovasculaires et hépatiques dominants.',
+      impact_reason: 'Les entreprises commercialisant des compléments sportifs doivent renforcer leur surveillance post-marché',
+      impact_action: '→ Renforcer la collecte des signalements pour les gammes sportives. Vérifier les procédures de déclaration ANSES (15j effets graves).',
+    },
+    {
+      source_code: 'EMA',
+      title: 'EFSA — Nouvelle guidance sur la sécurité des extraits de plantes dans les compléments alimentaires',
+      url: 'https://www.efsa.europa.eu/en/topics/topic/food-supplements',
+      published_date: '2025-02-28',
+      content: 'EFSA has published updated guidance on the safety assessment of botanical extracts used in food supplements. New maximum daily doses are established for 47 plant extracts, including valerian, ginkgo, and elderberry. Member states are expected to update national legislation by end of 2025.',
+      impact_score: 'important', vigilance_type: 'nutri',
+      summary: 'EFSA fixe de nouvelles doses journalières maximales pour 47 extraits de plantes (valériane, ginkgo, sureau...). Transposition nationale attendue fin 2025.',
+      impact_reason: 'Les fabricants de compléments à base de plantes doivent vérifier la conformité de leurs formulations',
+      impact_action: '→ Auditer les teneurs en extraits de plantes dans vos formulations vs nouvelles limites EFSA. Prévoir reformulation si nécessaire avant fin 2025.',
+    },
+    // ── COSMÉTOVIGILANCE ──────────────────────────────────────────────────────
+    {
+      source_code: 'ANSM',
+      title: 'ANSM — Cosmétovigilance : nouvelle obligation de déclaration des effets indésirables graves via SISP',
+      url: 'https://ansm.sante.fr/produits-de-sante/produits-cosmetiques',
+      published_date: '2025-01-30',
+      content: "Conformément au Règlement (CE) n°1223/2009, l'ANSM rappelle l'obligation pour les personnes responsables de déclarer sous 15 jours tout effet indésirable grave lié à un produit cosmétique. La déclaration doit désormais se faire via la plateforme SISP. Les signalements incluent réactions allergiques sévères, brûlures chimiques, et effets systémiques.",
+      impact_score: 'important', vigilance_type: 'cosmeto',
+      summary: "Rappel ANSM : déclaration obligatoire EIG cosmétiques sous 15j via SISP. Réactions allergiques sévères, brûlures et effets systémiques concernés.",
+      impact_reason: "Les responsables de mise sur le marché de cosmétiques doivent s'assurer que leurs équipes connaissent la procédure SISP",
+      impact_action: '→ Former les équipes cosmétovigilance à la plateforme SISP. Vérifier que toutes les réclamations graves sont transmises sous 15j.',
+    },
+    {
+      source_code: 'EMA',
+      title: 'Commission Européenne — Révision de la liste des substances interdites dans les produits cosmétiques (Annexe II)',
+      url: 'https://ec.europa.eu/growth/sectors/cosmetics_en',
+      published_date: '2025-03-05',
+      content: 'The European Commission has published a revision of Annex II to Regulation (EC) 1223/2009, adding 12 new substances to the prohibited list for cosmetic products. Among the additions: 3 UV filters identified as endocrine disruptors, 2 preservatives with new sensitization data, and 7 colorants with genotoxicity concerns. Compliance deadline: 6 months.',
+      impact_score: 'critical', vigilance_type: 'cosmeto',
+      summary: 'UE : 12 nouvelles substances interdites dans les cosmétiques (filtres UV, conservateurs, colorants). Délai de mise en conformité : 6 mois.',
+      impact_reason: 'Les fabricants de cosmétiques doivent auditer immédiatement leurs formulations et retirer les produits non conformes',
+      impact_action: '→ Audit urgent des formulations vs nouvelles substances interdites. Retrait ou reformulation obligatoire dans les 6 mois. Informer les clients professionnels.',
     },
   ];
 
   for (const u of seedUpdates) {
     const id = crypto.randomUUID();
     db.run(
-      'INSERT OR IGNORE INTO regintel_updates (id,source_code,source_name,title,url,published_date,raw_content,summary,impact_score,impact_reason,keywords,relevant_for,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT OR IGNORE INTO regintel_updates (id,source_code,source_name,title,url,published_date,raw_content,summary,impact_action,impact_score,impact_reason,vigilance_type,keywords,relevant_for,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [id, u.source_code, REGINTEL_SOURCES[u.source_code].name, u.title, u.url||null,
-       u.published_date, u.content, u.summary, u.impact_score, u.impact_reason,
+       u.published_date, u.content, u.summary, u.impact_action||null,
+       u.impact_score, u.impact_reason,
+       u.vigilance_type || 'pv',
        '[]', '["QPPV","DSO"]', new Date().toISOString()]
     );
   }
