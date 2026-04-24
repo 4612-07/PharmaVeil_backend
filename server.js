@@ -2352,48 +2352,69 @@ app.post('/api/mlm/import-cases', async (req, res) => {
       if (cases.length === 0) continue;
 
       for (const c of cases) {
-        const caseId = crypto.randomUUID();
-        const deadlines = _calcDeadlines(
-          c.seriousness && c.seriousness !== 'non-serious',
-          []
-        );
+        try {
+          const caseId = crypto.randomUUID();
+          const isSerious = c.seriousness && c.seriousness !== 'non-serious';
+          const deadlines = _calcDeadlines(isSerious, []);
 
-        await dbInsertCase({
-          id: caseId, orgId, status: 'pending_validation',
-          sourceType: 'literature_mlm',
-          rawContent: ('Article: ' + (article.title||'') + ' | ' + (article.content||'').substring(0,1000)),
-          receivedAt: new Date().toISOString(),
-          deadline7:  deadlines.deadline7?.toISOString()  || null,
-          deadline15: deadlines.deadline15?.toISOString() || null,
-          deadline90: deadlines.deadline90?.toISOString() || null,
-          seriousness: c.seriousness || 'non-serious',
-          reportType: 'literature',
-          reporterQualification: 'author',
-        });
+          await dbInsertCase({
+            id: caseId, orgId, status: 'pending_validation',
+            sourceType: 'literature_mlm',
+            rawContent: ('Article: ' + (article.title||'') + '\n\n' + (article.content||'').substring(0,2000)),
+            receivedAt: new Date().toISOString(),
+            deadline7:  deadlines.deadline7?.toISOString()  || null,
+            deadline15: deadlines.deadline15?.toISOString() || null,
+            deadline90: deadlines.deadline90?.toISOString() || null,
+            seriousness: c.seriousness || c.patient_seriousness || 'serious',
+            reportType: 'literature',
+            reporterQualification: 'author',
+          });
 
-        // Générer narrative
-        let narrative = null;
-        try { narrative = await generateNarrative({ ...c, reporterType: 'author' }); } catch {}
+          // Normaliser snake_case → camelCase
+          const drugName    = c.drug_name    || c.drugName    || null;
+          const adrDesc     = c.adr_description || c.adrDescription || (article.content||'').substring(0,300);
+          const patientAge  = c.patient_age  || c.patientAge  || null;
+          const patientSex  = c.patient_sex  || c.patientSex  || null;
+          const adrOutcome  = c.adr_outcome  || c.adrOutcome  || 'unknown';
+          const meddraSearchTerm = c.meddra_term || c.meddraSearchTerm || c.meddra_pt_name || adrDesc?.substring(0,100);
+          const reporterName = c.reporter_name || c.reporterName || article.title || 'MLM';
+          const seriousness  = c.seriousness || 'serious';
 
-        await dbInsertFields({
-          id: crypto.randomUUID(), caseId,
-          patientAge: c.patient_age, patientSex: c.patient_sex,
-          reporterName: c.reporter_name || article.title,
-          reporterType: 'author',
-          drugName: c.drug_name, drugDose: c.drug_dose,
-          adrDescription: c.adr_description,
-          adrOutcome: c.adr_outcome,
-          seriousness: c.seriousness || 'non-serious',
-          meddraSearchTerm: c.meddra_term || c.adr_description,
-          narrative,
-          confidenceScore: 0.75,
-          confidenceFlag: 'orange',
-          gvpValid: !!(c.drug_name && c.adr_description),
-          rawLlmOutput: null,
-        });
+          // Narrative via generateNarrative
+          let narrative = null;
+          try {
+            narrative = await generateNarrative({
+              patientAge, patientSex,
+              drugName, drugDose: c.drug_dose || c.drugDose,
+              adrDescription: adrDesc, adrOutcome, seriousness,
+              reporterType: 'author', reporterName,
+            });
+          } catch (narErr) {
+            console.warn('[MLM_IMPORT] narrative failed:', narErr.message);
+          }
 
-        await dbInsertAudit(caseId, 'case_created_mlm', 'system');
-        importedCases.push({ case_id: caseId, drug: c.drug_name, adr: c.adr_description });
+          await dbInsertFields({
+            id: crypto.randomUUID(), caseId,
+            patientAge, patientSex, patientWeight: null,
+            reporterName, reporterType: 'author', reporterCountry: null,
+            drugName, drugDose: c.drug_dose || c.drugDose || null,
+            drugRoute: null, drugStartDate: null,
+            adrDescription: adrDesc,
+            adrOnsetDate: null, adrOutcome, seriousness,
+            meddraSearchTerm,
+            narrative,
+            suspectDrugs: drugName ? JSON.stringify([{name: drugName}]) : null,
+            confidenceScore: 0.75, confidenceFlag: 'orange',
+            gvpValid: !!(drugName && adrDesc),
+            rawLlmOutput: null,
+          });
+
+          await dbInsertAudit(caseId, 'case_created_mlm', 'system');
+          importedCases.push({ case_id: caseId, drug: drugName, adr: adrDesc?.substring(0,80) });
+        } catch (caseErr) {
+          console.error('[MLM_IMPORT] Case insert failed:', caseErr.message);
+          // Continuer avec les autres cas
+        }
       }
     }
 
