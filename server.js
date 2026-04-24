@@ -136,13 +136,55 @@ function _initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_pt_lower  ON meddra_terms(pt_name_lower);
     CREATE INDEX IF NOT EXISTS idx_llt_lower ON meddra_terms(llt_name_lower);
     CREATE INDEX IF NOT EXISTS idx_ime ON meddra_terms(ime_flag);
+    CREATE TABLE IF NOT EXISTS submissions (
+      id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      mode TEXT NOT NULL DEFAULT 'export_xml',
+      authority TEXT DEFAULT 'EMA',
+      user_id TEXT,
+      file_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'completed',
+      ack_status TEXT DEFAULT NULL,
+      version INTEGER DEFAULT 1,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (case_id) REFERENCES icsr_cases(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sub_case  ON submissions(case_id);
+    CREATE INDEX IF NOT EXISTS idx_sub_org   ON submissions(org_id);
+    CREATE INDEX IF NOT EXISTS idx_sub_date  ON submissions(created_at);
   `);
   _seedMeddra(db);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  2. SEED MedDRA (subset démo 27.0)
-// ═══════════════════════════════════════════════════════════════════
+// ─── Migration: ajouter table submissions si absente (upgrade) ─────────────
+async function _migrateSubmissions() {
+  const db = await getDb();
+  try {
+    db.run(`CREATE TABLE IF NOT EXISTS submissions (
+      id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      mode TEXT NOT NULL DEFAULT 'export_xml',
+      authority TEXT DEFAULT 'EMA',
+      user_id TEXT,
+      file_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'completed',
+      ack_status TEXT DEFAULT NULL,
+      version INTEGER DEFAULT 1,
+      notes TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    try { db.run('CREATE INDEX IF NOT EXISTS idx_sub_case ON submissions(case_id)'); } catch {}
+    try { db.run('CREATE INDEX IF NOT EXISTS idx_sub_org  ON submissions(org_id)');  } catch {}
+    _saveDb();
+    console.log('[MIGRATIONS] submissions table OK');
+  } catch (err) { console.warn('[MIGRATIONS] submissions:', err.message); }
+}
+_migrateSubmissions();
+
+
 
 function _seedMeddra(db) {
   const terms = [
@@ -2633,6 +2675,257 @@ async function _seedRegIntel() {
 
 // Initialiser RegIntel au démarrage
 _seedRegIntel().catch(err => console.warn('[REGINTEL_SEED]', err.message));
+
+// ═══════════════════════════════════════════════════════════════════
+//  9-B. MODULE ASSISTANT SOUMISSION — PHASE 1
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── Prompt Pre-Submission Check ────────────────────────────────────────────
+
+function buildPrecheckPrompt(caseData, fields, authorityCode = 'EMA') {
+  const authority = AUTHORITY_RULES[authorityCode.toUpperCase()] || AUTHORITY_RULES.EMA;
+  return `Tu es un expert en validation des ICSR (Individual Case Safety Reports) selon GVP Module VI et les règles métier EudraVigilance v2.1.
+
+Analyse ce cas ICSR et produis un rapport de validation prédictive pour soumission à ${authority.name}.
+
+DONNÉES DU CAS :
+${JSON.stringify({
+  source_type: caseData.source_type,
+  seriousness: caseData.seriousness,
+  status: caseData.status,
+  received_at: caseData.received_at,
+  deadline_7: caseData.deadline_7,
+  deadline_15: caseData.deadline_15,
+  deadline_90: caseData.deadline_90,
+  patient_age: fields.patient_age,
+  patient_sex: fields.patient_sex,
+  patient_weight: fields.patient_weight,
+  reporter_name: fields.reporter_name,
+  reporter_type: fields.reporter_type,
+  reporter_country: fields.reporter_country,
+  drug_name: fields.drug_name,
+  drug_dose: fields.drug_dose,
+  drug_route: fields.drug_route,
+  drug_start_date: fields.drug_start_date,
+  adr_description: fields.adr_description,
+  adr_onset_date: fields.adr_onset_date,
+  adr_outcome: fields.adr_outcome,
+  meddra_pt_code: fields.meddra_pt_code,
+  meddra_pt_name: fields.meddra_pt_name,
+  confidence_score: fields.confidence_score,
+  gvp_valid: fields.gvp_valid,
+  narrative: fields.narrative ? 'présent' : 'absent',
+}, null, 2)}
+
+AUTORITÉ CIBLE : ${authority.name} (${authority.region})
+RÈGLES : ${authority.notes}
+
+Applique les règles de validation suivantes :
+1. CRITÈRES MINIMAUX ICH E2A : patient identifiable, médicament suspect, effet indésirable, rapporteur
+2. RÈGLES ${authorityCode.toUpperCase()} : ${authority.validity_rules.anonymous_patient_valid ? 'patient anonyme accepté' : 'patient identifiable OBLIGATOIRE'}
+3. COMPLÉTUDE E2B(R3) : codage MedDRA PT, voie d'administration, issue de l'EI
+4. COHÉRENCE LOGIQUE : dates cohérentes, cas grave = critère gravité coché
+5. DÉLAIS GVP : délai respecté depuis réception ?
+
+Réponds UNIQUEMENT avec ce JSON (aucun texte avant/après) :
+{
+  "completeness_score": 0-100,
+  "submission_ready": false,
+  "blocking_errors": [
+    { "code": "E001", "field": "Nom du champ affiché", "field_key": "clé_champ_db", "message": "Description claire du problème et comment le corriger" }
+  ],
+  "warnings": [
+    { "code": "W001", "field": "Nom du champ", "field_key": "clé_champ_db", "message": "Avertissement — génération possible mais risque de rejet" }
+  ],
+  "recommendations": [
+    { "code": "R001", "field": "Nom du champ", "message": "Bonne pratique ou amélioration suggérée" }
+  ],
+  "authority_check": {
+    "authority": "${authority.name}",
+    "valid": false,
+    "deadline_status": "ok|warning|overdue",
+    "deadline_message": "string",
+    "submission_format": "${authority.submission_format}"
+  },
+  "summary": "Résumé en 1-2 phrases de l'état du cas"
+}`;
+}
+
+// ─── Helper: enregistrer une soumission ─────────────────────────────────────
+
+async function dbInsertSubmission(data) {
+  const db = await getDb();
+  db.run(
+    'INSERT INTO submissions (id,case_id,org_id,mode,authority,user_id,file_hash,status,ack_status,version,notes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+    [
+      crypto.randomUUID(), data.caseId, data.orgId || 'default',
+      data.mode || 'export_xml', data.authority || 'EMA',
+      data.userId || null, data.fileHash || null,
+      data.status || 'completed', data.ackStatus || null,
+      data.version || 1, data.notes || null,
+      new Date().toISOString(),
+    ]
+  );
+  _saveDb();
+}
+
+// ─── POST /api/cases/:id/precheck ────────────────────────────────────────────
+
+app.post('/api/cases/:id/precheck', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const authority = (req.body?.authority || 'EMA').toUpperCase();
+
+    const caseRow   = await dbGetCase(id);
+    if (!caseRow) return res.status(404).json({ error: 'Cas introuvable' });
+    const fields    = await dbGetFields(id);
+    if (!fields)   return res.status(404).json({ error: 'Champs non extraits' });
+
+    const client    = getAnthropicClient();
+    const prompt    = buildPrecheckPrompt(caseRow, fields, authority);
+
+    const resp = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1200,
+      system: 'Tu es un expert en validation réglementaire ICSR. Réponds UNIQUEMENT avec du JSON valide, aucun texte avant ou après.',
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const raw = resp.content[0]?.text || '';
+    let report;
+    try {
+      report = _parseJson(raw);
+    } catch (e) {
+      return res.status(500).json({ error: 'Parsing JSON precheck', raw });
+    }
+
+    // Audit
+    await dbInsertAudit(id, 'precheck:' + authority, req.ip);
+
+    return res.json({
+      case_id: id,
+      authority,
+      ...report,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[PRECHECK]', err.message);
+    return res.status(500).json({ error: 'Erreur precheck', details: err.message });
+  }
+});
+
+// ─── POST /api/cases/:id/submissions  (enregistrer export manuel) ─────────────
+
+app.post('/api/cases/:id/submissions', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { mode = 'export_xml', authority = 'EMA', org_id, user_id, notes } = req.body || {};
+
+    const caseRow = await dbGetCase(id);
+    if (!caseRow) return res.status(404).json({ error: 'Cas introuvable' });
+
+    // Récupérer version courante (nombre de soumissions existantes + 1)
+    const db = await getDb();
+    const countStmt = db.prepare('SELECT COUNT(*) as c FROM submissions WHERE case_id=?');
+    const { c } = countStmt.getAsObject([id]);
+    countStmt.free();
+    const version = (c || 0) + 1;
+
+    await dbInsertSubmission({
+      caseId: id, orgId: org_id || caseRow.org_id || 'default',
+      mode, authority, userId: user_id, version, notes,
+      status: 'completed',
+    });
+
+    await dbInsertAudit(id, `submission:${mode}:${authority}:v${version}`, req.ip, user_id);
+
+    return res.json({
+      success: true,
+      case_id: id,
+      mode,
+      authority,
+      version,
+      recorded_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[SUBMISSIONS_POST]', err.message);
+    return res.status(500).json({ error: 'Erreur enregistrement', details: err.message });
+  }
+});
+
+// ─── GET /api/cases/:id/submissions  (historique d'un cas) ────────────────────
+
+app.get('/api/cases/:id/submissions', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const db = await getDb();
+    const stmt = db.prepare('SELECT * FROM submissions WHERE case_id=? ORDER BY created_at DESC');
+    stmt.bind([id]);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    return res.json({ case_id: id, submissions: rows });
+  } catch (err) {
+    console.error('[SUBMISSIONS_GET]', err.message);
+    return res.status(500).json({ error: 'Erreur', details: err.message });
+  }
+});
+
+// ─── GET /api/submissions  (tableau de bord org) ─────────────────────────────
+
+app.get('/api/submissions', async (req, res) => {
+  try {
+    const orgId  = req.query.org_id || 'default';
+    const limit  = Math.min(parseInt(req.query.limit) || 50, 200);
+    const offset = parseInt(req.query.offset) || 0;
+    const authority = req.query.authority || null;
+    const mode   = req.query.mode || null;
+
+    const db = await getDb();
+
+    // Joindre avec icsr_cases et extracted_fields pour enrichir
+    let sql = `
+      SELECT
+        s.*,
+        c.seriousness, c.source_type, c.status as case_status,
+        c.deadline_7, c.deadline_15, c.deadline_90,
+        c.received_at,
+        ef.drug_name, ef.adr_description, ef.meddra_pt_name
+      FROM submissions s
+      LEFT JOIN icsr_cases c ON s.case_id = c.id
+      LEFT JOIN extracted_fields ef ON s.case_id = ef.case_id
+      WHERE s.org_id=?
+    `;
+    const params = [orgId];
+
+    if (authority) { sql += ' AND s.authority=?'; params.push(authority); }
+    if (mode)      { sql += ' AND s.mode=?'; params.push(mode); }
+
+    sql += ' ORDER BY s.created_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const stmt = db.prepare(sql);
+    stmt.bind(params);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+
+    // Compteur total
+    const countStmt = db.prepare('SELECT COUNT(*) as total FROM submissions WHERE org_id=?');
+    const { total } = countStmt.getAsObject([orgId]);
+    countStmt.free();
+
+    return res.json({ submissions: rows, total: total || 0, limit, offset });
+  } catch (err) {
+    console.error('[SUBMISSIONS_DASHBOARD]', err.message);
+    return res.status(500).json({ error: 'Erreur', details: err.message });
+  }
+});
+
+// ─── Intercept export pour archiver automatiquement ──────────────────────────
+// Wrapper autour des routes export existantes pour logger chaque téléchargement
+// NB: On ne modifie pas les routes d'export existantes pour éviter la régression.
+// L'archivage se fait via l'appel POST /api/cases/:id/submissions depuis le frontend.
 
 // ─── 404 + Error handler ──────────────────────────────────────────────────────
 
