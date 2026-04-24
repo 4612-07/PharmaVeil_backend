@@ -3510,7 +3510,24 @@ app.get('/api/submissions', async (req, res) => {
 // NB: On ne modifie pas les routes d'export existantes pour éviter la régression.
 // L'archivage se fait via l'appel POST /api/cases/:id/submissions depuis le frontend.
 
-// ─── 404 + Error handler ──────────────────────────────────────────────────────
+// ─── GET /api/debug/cases — Diagnostic: tous les cas en DB (admin only) ───────
+app.get('/api/debug/cases', async (req, res) => {
+  try {
+    const db = await getDb();
+    const stmt = db.prepare('SELECT id, org_id, status, source_type, seriousness, received_at FROM icsr_cases ORDER BY received_at DESC LIMIT 50');
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    const countStmt = db.prepare('SELECT COUNT(*) as total FROM icsr_cases');
+    const { total } = countStmt.getAsObject([]);
+    countStmt.free();
+    return res.json({ total, cases: rows });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 app.use((req, res) =>
   res.status(404).json({ error: `Route introuvable: ${req.method} ${req.path}` })
