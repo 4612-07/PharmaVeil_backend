@@ -2120,6 +2120,83 @@ async function analyzeArticleForPV(articleText, molecule, keywords) {
   return _parseJson(raw);
 }
 
+// ─── POST /api/mlm/extract-pdf — Extraire et segmenter un PDF en articles MLM ──
+const uploadMlmPdf = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+app.post('/api/mlm/extract-pdf', uploadMlmPdf.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Fichier PDF requis' });
+    const molecule = req.body?.molecule || '';
+
+    // Extraire le texte du PDF
+    const parsed = await pdfParse(req.file.buffer);
+    const fullText = parsed.text || '';
+    if (fullText.trim().length < 100) {
+      return res.status(400).json({ error: 'PDF illisible ou vide — essayez un PDF texte natif' });
+    }
+
+    const client = getAnthropicClient();
+
+    // Demander à Claude de segmenter le texte en rapports individuels
+    const prompt = `You are a pharmacovigilance data extraction expert.
+
+This PDF contains one or more individual safety reports (ICSR, MedWatch, FDA Safety Reports, case narratives, etc.).
+
+FULL TEXT (first 12000 chars):
+${fullText.substring(0, 12000)}
+
+Task: Split this document into individual case reports. For each distinct case/report found:
+1. Extract a short reference title (reporter, date, product if available)
+2. Extract the clinical narrative (what happened, patient details, product, outcome)
+
+Return ONLY this JSON (no other text):
+{
+  "total_cases_found": 3,
+  "articles": [
+    {
+      "title": "FDA CTP Report — Vapor King — Female 66y — 2014-02-09",
+      "content": "Full narrative text for this individual case..."
+    }
+  ]
+}
+
+Rules:
+- Maximum 50 articles
+- Each content must be at least 100 characters
+- If only 1 report in the PDF, return 1 article
+- Include all clinically relevant details: patient demographics, product, event description, outcome, treatment
+- Do NOT include administrative/contact information or redacted (b)(6) fields`;
+
+    const resp = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const raw = resp.content[0]?.text || '';
+    let data;
+    try {
+      data = _parseJson(raw);
+    } catch {
+      return res.status(500).json({ error: 'Segmentation PDF échouée', raw: raw.substring(0, 200) });
+    }
+
+    const articles = (data.articles || []).filter(a => a.content && a.content.length > 50);
+    if (articles.length === 0) {
+      return res.status(422).json({ error: 'Aucun cas détecté dans ce PDF — vérifiez le contenu' });
+    }
+
+    return res.json({
+      success: true,
+      pages: parsed.numpages,
+      total_cases_found: data.total_cases_found || articles.length,
+      articles,
+    });
+  } catch (err) {
+    console.error('[MLM_PDF]', err.message);
+    return res.status(500).json({ error: 'Erreur extraction PDF', details: err.message });
+  }
+});
+
 // POST /api/mlm/screen — Soumettre un lot d'articles
 app.post('/api/mlm/screen', async (req, res) => {
   const t0 = Date.now();
