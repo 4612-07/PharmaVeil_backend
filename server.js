@@ -372,6 +372,15 @@ function _parseJson(raw) {
   return JSON.parse(text.slice(s, e + 1));
 }
 
+// Helper: reconstitue le JSON depuis un assistant prefill '{'
+// Claude peut ou non répéter le '{' — on normalise dans tous les cas
+function _rebuildJson(prefillChar, rawResponse) {
+  const r = (rawResponse || '').trim();
+  // Si Claude a répété le '{', on n'en ajoute pas un 2ème
+  return r.startsWith(prefillChar) ? r : prefillChar + r;
+}
+
+
 function _confFlag(score) {
   return score >= CONF_GREEN ? 'green' : score >= CONF_ORANGE ? 'orange' : 'red';
 }
@@ -645,15 +654,11 @@ async function extractIcsrData(sourceText, sourceType) {
   const response = await client.messages.create({
     model: 'claude-sonnet-4-6', max_tokens: 2500,
     system: SYSTEM_PROMPT,
-    messages: [
-      { role: 'user', content: buildUserPrompt(sourceText, sourceType) },
-      { role: 'assistant', content: '{' },
-    ],
+    messages: [{ role: 'user', content: buildUserPrompt(sourceText, sourceType) }],
   });
 
-  const rawText = response.content[0]?.type === 'text' ? response.content[0].text : null;
-  if (!rawText) throw new Error('Réponse Claude vide');
-  const raw = '{' + rawText;
+  const raw = response.content[0]?.type === 'text' ? response.content[0].text : null;
+  if (!raw) throw new Error('Réponse Claude vide');
 
   const data = _parseJson(raw);
   const score = typeof data.confidence_score === 'number' ? data.confidence_score : 0;
@@ -2526,7 +2531,7 @@ async function analyzeRegulatoryUpdate(title, content, source) {
       ],
     });
 
-    const raw = '{' + (response.content[0]?.text || '');
+    const raw = _rebuildJson('{', response.content[0]?.text || '');
     return _parseJson(raw);
   } catch (err) {
     console.warn('[REGINTEL] Analysis failed:', err.message);
@@ -3187,7 +3192,7 @@ app.post('/api/cases/:id/precheck', async (req, res) => {
     });
 
     // Reconstruire le JSON complet (prefill + réponse)
-    const raw = '{' + (resp.content[0]?.text || '');
+    const raw = _rebuildJson('{', resp.content[0]?.text || '');
     console.log('[PRECHECK] raw length:', raw.length, 'starts:', raw.substring(0, 60));
 
     let report;
