@@ -645,11 +645,15 @@ async function extractIcsrData(sourceText, sourceType) {
   const response = await client.messages.create({
     model: 'claude-sonnet-4-6', max_tokens: 2500,
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildUserPrompt(sourceText, sourceType) }],
+    messages: [
+      { role: 'user', content: buildUserPrompt(sourceText, sourceType) },
+      { role: 'assistant', content: '{' },
+    ],
   });
 
-  const raw = response.content[0]?.type === 'text' ? response.content[0].text : null;
-  if (!raw) throw new Error('Réponse Claude vide');
+  const rawText = response.content[0]?.type === 'text' ? response.content[0].text : null;
+  if (!rawText) throw new Error('Réponse Claude vide');
+  const raw = '{' + rawText;
 
   const data = _parseJson(raw);
   const score = typeof data.confidence_score === 'number' ? data.confidence_score : 0;
@@ -1508,24 +1512,47 @@ app.post('/api/cases/intake/xml', async (req, res) => {
     } else if (req.body?.xml_content) {
       xmlText = req.body.xml_content;
     } else {
-      return res.status(400).json({ error: 'XML E2B(R3) requis — body XML ou champ xml_content' });
-    }
-
-    // Validation souple — accepter différents formats E2B
-    const xmlLower = xmlText.toLowerCase();
-    const isValidE2b = xmlLower.includes('ichicsr') || 
-                       xmlLower.includes('safetyreport') || 
-                       xmlLower.includes('medicinalproduct') ||
-                       xmlLower.includes('primarysourcereaction') ||
-                       (xmlLower.includes('<drug') && xmlLower.includes('<reaction'));
-    if (!isValidE2b) {
-      return res.status(422).json({ error: 'Format XML non reconnu — E2B(R3) ICH attendu (balises ichicsr, safetyreport, medicinalproduct)' });
+      return res.status(400).json({ error: 'XML requis — body XML ou champ xml_content' });
     }
 
     const orgId = (typeof req.body === 'object' ? req.body?.org_id : null) || 'default';
+    const xmlLower = xmlText.toLowerCase();
 
-    // Parser le XML E2B entrant
-    const extracted = parseE2bXml(xmlText);
+    // Détection format E2B(R3) ICH
+    const isE2b = xmlLower.includes('ichicsr') ||
+                  xmlLower.includes('safetyreport') ||
+                  xmlLower.includes('medicinalproduct') ||
+                  xmlLower.includes('primarysourcereaction') ||
+                  (xmlLower.includes('<drug') && xmlLower.includes('<reaction'));
+
+    // Détection HL7 v3 (MCCI_IN200100UV, HL7 CDA, etc.)
+    const isHL7 = xmlLower.includes('mcci_in') || xmlLower.includes('hl7') ||
+                  xmlLower.includes('controlactprocess') || xmlLower.includes('cda') ||
+                  xmlLower.includes('clinicaldocument');
+
+    let extracted;
+
+    if (isE2b) {
+      // Parsing structuré E2B(R3) natif
+      extracted = parseE2bXml(xmlText);
+    } else {
+      // Format non-E2B (HL7 v3, CDA, propriétaire, etc.) → extraction Claude NLP
+      console.log('[XML_INTAKE] Non-E2B format detected (HL7/CDA/other), routing to Claude NLP');
+      const sourceType = isHL7 ? 'hl7_v3' : 'xml_other';
+      // Nettoyer le XML pour Claude (supprimer balises techniques, garder le contenu médical)
+      const cleanedXml = xmlText
+        .replace(/<\?xml[^>]*\?>/g, '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/<[^>]*xsi:[^>]*>/g, '')
+        .replace(/\s+/g, ' ')
+        .substring(0, 8000);
+
+      extracted = await extractIcsrData(
+        `[XML ${sourceType.toUpperCase()} — auto-converted for NLP extraction]\n${cleanedXml}`,
+        'xml_other'
+      );
+      extracted.sourceType = sourceType;
+    }
 
     // Calculer les délais
     const deadlines = _calcDeadlines(
@@ -1533,15 +1560,16 @@ app.post('/api/cases/intake/xml', async (req, res) => {
       extracted.criteria || []
     );
 
-    // Générer la narrative si données suffisantes
-    if (extracted.gvpValid) {
+    // Générer narrative si données suffisantes
+    if (extracted.gvpValid || extracted.adrDescription) {
       try { extracted.narrative = await generateNarrative(extracted); } catch {}
     }
 
     const caseId = crypto.randomUUID();
 
     await dbInsertCase({
-      id: caseId, orgId, status: 'pending_validation', sourceType: 'xml_e2b',
+      id: caseId, orgId, status: 'pending_validation',
+      sourceType: extracted.sourceType || (isE2b ? 'xml_e2b' : 'xml_other'),
       rawContent: xmlText.substring(0, 50000),
       receivedAt: extracted.receivedAt || new Date().toISOString(),
       deadline7:  deadlines.deadline7?.toISOString()  || null,
@@ -1568,11 +1596,17 @@ app.post('/api/cases/intake/xml', async (req, res) => {
     return res.status(201).json({
       case_id: caseId,
       status: 'pending_validation',
-      source_type: 'xml_e2b',
+      source_type: extracted.sourceType || (isE2b ? 'xml_e2b' : 'xml_other'),
+      xml_format: isE2b ? 'E2B(R3)' : isHL7 ? 'HL7 v3 (NLP extraction)' : 'XML other (NLP extraction)',
       source_reference: extracted.safetyReportId || null,
       processing_ms: Date.now() - t0,
       drugs_detected: extracted.suspectDrugs?.length || 1,
-      narrative_generated: !!extracted.narrative,
+      narrative_generated: !!(extracted.narrative),
+      confidence_score: extracted.confidenceScore || 0,
+      confidence_flag: extracted.confidenceFlag || 'red',
+      gvp_valid: extracted.gvpValid || false,
+      duplicate_flag: duplicateInfo.isDuplicate,
+    });!extracted.narrative,
       duplicate_flag: duplicateInfo.isDuplicate,
       gvp_valid: extracted.gvpValid,
       seriousness: extracted.seriousness,
@@ -2495,10 +2529,14 @@ async function analyzeRegulatoryUpdate(title, content, source) {
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1000,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: '{' },
+      ],
     });
 
-    return _parseJson(response.content[0]?.text || '{}');
+    const raw = '{' + (response.content[0]?.text || '');
+    return _parseJson(raw);
   } catch (err) {
     console.warn('[REGINTEL] Analysis failed:', err.message);
     return { summary: content?.substring(0, 200) || title, impact_score: 'info', vigilance_type: 'pv' };
@@ -3138,36 +3176,55 @@ app.post('/api/cases/:id/precheck', async (req, res) => {
     const { id } = req.params;
     const authority = (req.body?.authority || 'EMA').toUpperCase();
 
-    const caseRow   = await dbGetCase(id);
+    const caseRow = await dbGetCase(id);
     if (!caseRow) return res.status(404).json({ error: 'Cas introuvable' });
-    const fields    = await dbGetFields(id);
-    if (!fields)   return res.status(404).json({ error: 'Champs non extraits' });
+    const fields  = await dbGetFields(id);
+    if (!fields)  return res.status(404).json({ error: 'Champs non extraits' });
 
-    const client    = getAnthropicClient();
-    const prompt    = buildPrecheckPrompt(caseRow, fields, authority);
+    const client = getAnthropicClient();
+    const prompt = buildPrecheckPrompt(caseRow, fields, authority);
 
+    // Assistant prefill "{" force Claude à démarrer directement le JSON
     const resp = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1200,
-      system: 'Tu es un expert en validation réglementaire ICSR. Réponds UNIQUEMENT avec du JSON valide, aucun texte avant ou après.',
-      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1500,
+      system: 'You are an ICSR regulatory validation expert. Output ONLY raw JSON. No markdown, no explanation, no code fences. Start directly with {',
+      messages: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: '{' },
+      ],
     });
 
-    const raw = resp.content[0]?.text || '';
+    // Reconstruire le JSON complet (prefill + réponse)
+    const raw = '{' + (resp.content[0]?.text || '');
+    console.log('[PRECHECK] raw length:', raw.length, 'starts:', raw.substring(0, 60));
+
     let report;
     try {
-      report = _parseJson(raw);
-    } catch (e) {
-      return res.status(500).json({ error: 'Parsing JSON precheck', raw });
+      // Tentative 1 : parse direct
+      report = JSON.parse(raw);
+    } catch {
+      try {
+        // Tentative 2 : extraction {} robuste
+        report = _parseJson(raw);
+      } catch (e2) {
+        console.error('[PRECHECK] parse failed, raw:', raw.substring(0, 500));
+        return res.status(500).json({ error: 'Parsing JSON precheck', details: e2.message, raw: raw.substring(0, 300) });
+      }
     }
 
-    // Audit
     await dbInsertAudit(id, 'precheck:' + authority, req.ip);
 
     return res.json({
       case_id: id,
       authority,
-      ...report,
+      completeness_score: report.completeness_score ?? 0,
+      submission_ready: report.submission_ready ?? false,
+      blocking_errors: report.blocking_errors || [],
+      warnings: report.warnings || [],
+      recommendations: report.recommendations || [],
+      authority_check: report.authority_check || null,
+      summary: report.summary || '',
       generated_at: new Date().toISOString(),
     });
   } catch (err) {
