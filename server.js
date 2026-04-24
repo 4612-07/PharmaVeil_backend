@@ -2368,12 +2368,13 @@ const REGINTEL_SOURCES = {
   },
 };
 
-// Table RegIntel
+// Table RegIntel — version étendue (spec Marie-Adrienne)
 async function _initRegIntelTable() {
   const db = await getDb();
   db.run(`
     CREATE TABLE IF NOT EXISTS regintel_updates (
       id TEXT PRIMARY KEY,
+      org_id TEXT DEFAULT 'global',
       source_code TEXT NOT NULL,
       source_name TEXT NOT NULL,
       title TEXT NOT NULL,
@@ -2381,10 +2382,17 @@ async function _initRegIntelTable() {
       published_date TEXT,
       raw_content TEXT,
       summary TEXT,
+      impact_action TEXT,
+      source_page TEXT,
       impact_score TEXT DEFAULT 'info',
       impact_reason TEXT,
+      vigilance_type TEXT DEFAULT 'pv',
       keywords TEXT,
       relevant_for TEXT,
+      affects_deadlines INTEGER DEFAULT 0,
+      affects_meddra INTEGER DEFAULT 0,
+      affects_e2b INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'new',
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS regintel_digests (
@@ -2396,58 +2404,104 @@ async function _initRegIntelTable() {
       critical_count INTEGER DEFAULT 0,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS regintel_profiles (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL UNIQUE,
+      countries TEXT DEFAULT '["FR","EU"]',
+      vigilance_types TEXT DEFAULT '["pv"]',
+      therapeutic_classes TEXT DEFAULT '[]',
+      dci_list TEXT DEFAULT '[]',
+      alert_email TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS regintel_tasks (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL DEFAULT 'default',
+      update_id TEXT,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'new',
+      priority TEXT DEFAULT 'important',
+      assigned_to TEXT,
+      due_date TEXT,
+      created_by TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS regintel_task_audit (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      org_id TEXT NOT NULL,
+      user_id TEXT,
+      action TEXT NOT NULL,
+      old_status TEXT,
+      new_status TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ri_org   ON regintel_updates(org_id);
+    CREATE INDEX IF NOT EXISTS idx_ri_score ON regintel_updates(impact_score);
+    CREATE INDEX IF NOT EXISTS idx_ri_vtype ON regintel_updates(vigilance_type);
+    CREATE INDEX IF NOT EXISTS idx_task_org ON regintel_tasks(org_id);
   `);
+  // Migrations colonnes pour DB existantes
+  const cols = ['vigilance_type','impact_action','source_page','org_id','status',
+    'affects_deadlines','affects_meddra','affects_e2b'];
+  for (const col of cols) {
+    try {
+      const type = col.startsWith('affects_') ? 'INTEGER DEFAULT 0'
+        : col==='org_id' ? "TEXT DEFAULT 'global'"
+        : col==='status' ? "TEXT DEFAULT 'new'"
+        : col==='vigilance_type' ? "TEXT DEFAULT 'pv'"
+        : 'TEXT';
+      db.run(`ALTER TABLE regintel_updates ADD COLUMN ${col} ${type}`);
+    } catch {}
+  }
   _saveDb();
 }
 
-// Analyser un update réglementaire avec Claude
+// Analyser un update réglementaire avec Claude — version enrichie Marie-Adrienne
 async function analyzeRegulatoryUpdate(title, content, source) {
   try {
     const client = getAnthropicClient();
     const prompt = [
-      "You are a senior pharmacovigilance regulatory expert.",
-      "Analyze this regulatory update and provide a structured assessment.",
+      "You are a senior pharmacovigilance regulatory expert (QPPV level).",
+      "Analyze this regulatory update and provide a structured assessment in JSON.",
       "",
       "SOURCE: " + source,
       "TITLE: " + title,
-      "CONTENT: " + (content || title).substring(0, 3000),
+      "CONTENT: " + (content || title).substring(0, 4000),
       "",
-      "Provide ONLY this JSON:",
+      "Provide ONLY this JSON (no text before/after):",
       JSON.stringify({
-        summary: "3-sentence plain language summary of what changed",
+        summary: "Executive summary in 5-8 lines maximum — plain language, factual",
+        impact_action: "→ SO WHAT: Exact operational impact for PV teams. Be specific: 'Submission deadline for non-serious cases changes from 90 to X days in Y country from DATE.' or null if no direct action needed",
+        source_page: "Exact page or section reference if applicable, e.g. 'Page 42, Section 3.1' or null",
         impact_score: "critical|important|info",
-        impact_reason: "Why this matters for PV teams in 1 sentence",
+        impact_reason: "Why this matters for PV operations in 1 sentence",
+        vigilance_type: "pv|materio|nutri|cosmeto",
         relevant_for: ["QPPV","DSO","regulatory_affairs","clinical_safety"],
-        keywords: ["keyword1","keyword2"],
-        action_required: "What PV teams should do now, or null if no action needed",
-        deadline: "deadline if applicable, or null",
+        keywords: ["keyword1","keyword2","keyword3"],
         affects_deadlines: false,
         affects_meddra: false,
         affects_e2b: false,
+        action_required: "What PV teams should do now, or null",
+        deadline: "Compliance deadline if applicable, or null",
+        countries: ["FR","EU","US","UK","JP","ZA"],
       })
     ].join("\n");
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 800,
+      max_tokens: 1000,
       messages: [{ role: 'user', content: prompt }],
     });
 
     return _parseJson(response.content[0]?.text || '{}');
   } catch (err) {
     console.warn('[REGINTEL] Analysis failed:', err.message);
-    return {
-      summary: title,
-      impact_score: 'info',
-      impact_reason: 'Regulatory update',
-      relevant_for: ['QPPV'],
-      keywords: [],
-      action_required: null,
-      deadline: null,
-      affects_deadlines: false,
-      affects_meddra: false,
-      affects_e2b: false,
-    };
+    return { summary: content?.substring(0, 200) || title, impact_score: 'info', vigilance_type: 'pv' };
   }
 }
 
@@ -2675,6 +2729,314 @@ async function _seedRegIntel() {
 
 // Initialiser RegIntel au démarrage
 _seedRegIntel().catch(err => console.warn('[REGINTEL_SEED]', err.message));
+
+// ═══════════════════════════════════════════════════════════════════
+//  9-A-BIS. REGINTEL ENRICHI — SPEC MARIE-ADRIENNE
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── GET /api/regintel/profile — profil réglementaire org ─────────────────────
+app.get('/api/regintel/profile', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const orgId = req.query.org_id || 'default';
+    const db = await getDb();
+    const stmt = db.prepare('SELECT * FROM regintel_profiles WHERE org_id=?');
+    const row = stmt.getAsObject([orgId]);
+    stmt.free();
+    if (!row.id) {
+      return res.json({
+        org_id: orgId, countries: ['FR','EU'], vigilance_types: ['pv'],
+        therapeutic_classes: [], dci_list: [], alert_email: null,
+      });
+    }
+    return res.json({
+      ...row,
+      countries: JSON.parse(row.countries||'[]'),
+      vigilance_types: JSON.parse(row.vigilance_types||'[]'),
+      therapeutic_classes: JSON.parse(row.therapeutic_classes||'[]'),
+      dci_list: JSON.parse(row.dci_list||'[]'),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/regintel/profile — sauvegarder profil ─────────────────────────
+app.post('/api/regintel/profile', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const { org_id='default', countries=[], vigilance_types=['pv'],
+      therapeutic_classes=[], dci_list=[], alert_email=null } = req.body;
+    const db = await getDb();
+    const now = new Date().toISOString();
+    const existing = db.prepare('SELECT id FROM regintel_profiles WHERE org_id=?').getAsObject([org_id]);
+    if (existing.id) {
+      db.run('UPDATE regintel_profiles SET countries=?,vigilance_types=?,therapeutic_classes=?,dci_list=?,alert_email=?,updated_at=? WHERE org_id=?',
+        [JSON.stringify(countries), JSON.stringify(vigilance_types), JSON.stringify(therapeutic_classes),
+         JSON.stringify(dci_list), alert_email, now, org_id]);
+    } else {
+      db.run('INSERT INTO regintel_profiles (id,org_id,countries,vigilance_types,therapeutic_classes,dci_list,alert_email,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        [crypto.randomUUID(), org_id, JSON.stringify(countries), JSON.stringify(vigilance_types),
+         JSON.stringify(therapeutic_classes), JSON.stringify(dci_list), alert_email, now, now]);
+    }
+    _saveDb();
+    return res.json({ success: true, org_id, updated_at: now });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/regintel/tasks — liste des tâches Kanban ────────────────────────
+app.get('/api/regintel/tasks', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const orgId = req.query.org_id || 'default';
+    const status = req.query.status || null;
+    const db = await getDb();
+    let sql = `
+      SELECT t.*, u.title as update_title, u.source_name, u.impact_score, u.vigilance_type
+      FROM regintel_tasks t
+      LEFT JOIN regintel_updates u ON t.update_id = u.id
+      WHERE t.org_id=?`;
+    const params = [orgId];
+    if (status) { sql += ' AND t.status=?'; params.push(status); }
+    sql += ' ORDER BY CASE t.priority WHEN "critical" THEN 0 WHEN "important" THEN 1 ELSE 2 END, t.created_at DESC';
+    const stmt = db.prepare(sql);
+    stmt.bind(params);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    return res.json({ tasks: rows });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/regintel/tasks — créer une tâche depuis une alerte ─────────────
+app.post('/api/regintel/tasks', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const { org_id='default', update_id, title, description, priority='important',
+      assigned_to=null, due_date=null, created_by=null } = req.body;
+    if (!title) return res.status(400).json({ error: 'title requis' });
+    const db = await getDb();
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    db.run('INSERT INTO regintel_tasks (id,org_id,update_id,title,description,status,priority,assigned_to,due_date,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      [id, org_id, update_id||null, title, description||null, 'new', priority, assigned_to, due_date, created_by, now, now]);
+    db.run('INSERT INTO regintel_task_audit (id,task_id,org_id,user_id,action,old_status,new_status,notes,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+      [crypto.randomUUID(), id, org_id, created_by, 'created', null, 'new', 'Task created from RegIntel alert', now]);
+    _saveDb();
+    return res.json({ success: true, task_id: id, created_at: now });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PATCH /api/regintel/tasks/:id — mettre à jour statut Kanban ──────────────
+app.patch('/api/regintel/tasks/:id', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const { id } = req.params;
+    const { status, assigned_to, notes, user_id='system', due_date } = req.body;
+    const db = await getDb();
+    const existing = db.prepare('SELECT * FROM regintel_tasks WHERE id=?').getAsObject([id]);
+    if (!existing.id) return res.status(404).json({ error: 'Tâche introuvable' });
+    const now = new Date().toISOString();
+    const updates = [];
+    const params = [];
+    if (status) { updates.push('status=?'); params.push(status); }
+    if (assigned_to !== undefined) { updates.push('assigned_to=?'); params.push(assigned_to); }
+    if (due_date !== undefined) { updates.push('due_date=?'); params.push(due_date); }
+    updates.push('updated_at=?'); params.push(now);
+    params.push(id);
+    db.run(`UPDATE regintel_tasks SET ${updates.join(',')} WHERE id=?`, params);
+    if (status && status !== existing.status) {
+      db.run('INSERT INTO regintel_task_audit (id,task_id,org_id,user_id,action,old_status,new_status,notes,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        [crypto.randomUUID(), id, existing.org_id, user_id, 'status_change', existing.status, status, notes||null, now]);
+    }
+    _saveDb();
+    return res.json({ success: true, task_id: id, new_status: status || existing.status });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/regintel/tasks/:id/audit — piste d'audit d'une tâche ────────────
+app.get('/api/regintel/tasks/:id/audit', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const db = await getDb();
+    const stmt = db.prepare('SELECT * FROM regintel_task_audit WHERE task_id=? ORDER BY created_at ASC');
+    stmt.bind([req.params.id]);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    return res.json({ task_id: req.params.id, audit: rows });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/regintel/ingest/pdf — ingestion d'un PDF réglementaire ─────────
+const uploadRegIntel = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+app.post('/api/regintel/ingest/pdf', uploadRegIntel.single('file'), async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    if (!req.file) return res.status(400).json({ error: 'Fichier PDF requis' });
+    const { source_code='EMA', org_id='default', published_date } = req.body;
+    // Extraire le texte du PDF
+    const parsed = await pdfParse(req.file.buffer);
+    const text = parsed.text?.substring(0, 8000) || '';
+    if (text.length < 50) return res.status(400).json({ error: 'PDF illisible ou vide' });
+    const filename = req.file.originalname || 'document.pdf';
+    const source = REGINTEL_SOURCES[source_code]?.name || source_code;
+    // Analyse IA
+    const analysis = await analyzeRegulatoryUpdate(filename, text, source);
+    const id = crypto.randomUUID();
+    const db = await getDb();
+    db.run(
+      'INSERT INTO regintel_updates (id,org_id,source_code,source_name,title,published_date,raw_content,summary,impact_action,source_page,impact_score,impact_reason,vigilance_type,keywords,relevant_for,affects_deadlines,affects_meddra,affects_e2b,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [id, org_id, source_code, source, analysis.summary?.substring(0,100)||filename,
+       published_date||new Date().toISOString().slice(0,10),
+       text.substring(0,5000), analysis.summary||'', analysis.impact_action||null,
+       analysis.source_page||null, analysis.impact_score||'info', analysis.impact_reason||null,
+       analysis.vigilance_type||'pv',
+       JSON.stringify(analysis.keywords||[]), JSON.stringify(analysis.relevant_for||[]),
+       analysis.affects_deadlines?1:0, analysis.affects_meddra?1:0, analysis.affects_e2b?1:0,
+       'new', new Date().toISOString()]
+    );
+    _saveDb();
+    return res.json({ success: true, update_id: id, analysis, pages: parsed.numpages });
+  } catch (err) {
+    console.error('[REGINTEL_PDF]', err.message);
+    return res.status(500).json({ error: 'Erreur ingestion PDF', details: err.message });
+  }
+});
+
+// ─── PATCH /api/regintel/updates/:id/status — marquer comme lu ────────────────
+app.patch('/api/regintel/updates/:id/status', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const { status='read' } = req.body;
+    const db = await getDb();
+    db.run('UPDATE regintel_updates SET status=? WHERE id=?', [status, req.params.id]);
+    _saveDb();
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/regintel/report — rapport d'inspection PDF ──────────────────────
+app.get('/api/regintel/report', async (req, res) => {
+  try {
+    await _initRegIntelTable();
+    const orgId = req.query.org_id || 'default';
+    const since = req.query.since || new Date(Date.now() - 90 * 86400000).toISOString().slice(0,10);
+    const db = await getDb();
+
+    // Récupérer updates critiques et importantes
+    const uStmt = db.prepare(`SELECT * FROM regintel_updates WHERE created_at>=? AND impact_score IN ('critical','important') ORDER BY impact_score ASC, created_at DESC LIMIT 100`);
+    uStmt.bind([since+'T00:00:00.000Z']);
+    const updates = [];
+    while (uStmt.step()) updates.push(uStmt.getAsObject());
+    uStmt.free();
+
+    // Récupérer tâches clôturées
+    const tStmt = db.prepare(`SELECT t.*, u.title as update_title FROM regintel_tasks t LEFT JOIN regintel_updates u ON t.update_id=u.id WHERE t.org_id=? AND t.updated_at>=? ORDER BY t.updated_at DESC LIMIT 50`);
+    tStmt.bind([orgId, since+'T00:00:00.000Z']);
+    const tasks = [];
+    while (tStmt.step()) tasks.push(tStmt.getAsObject());
+    tStmt.free();
+
+    // Générer le PDF
+    const doc = new PDFDoc({ size: 'A4', margins: { top:40, bottom:40, left:45, right:45 } });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+
+    await new Promise((resolve, reject) => {
+      doc.on('end', resolve);
+      doc.on('error', reject);
+      const now = new Date().toLocaleDateString('fr-FR');
+      let y = 40;
+      const W = 505; // page width usable
+
+      // Header
+      doc.rect(45, y, W, 52).fill('#0c1120');
+      doc.font('Helvetica-Bold').fontSize(18).fillColor('#00d4aa').text('PharmaVeil', 55, y+10);
+      doc.font('Helvetica').fontSize(8).fillColor('rgba(255,255,255,.6)').text('pharmaveil.eu — RegIntel', 55, y+30);
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#fff').text("RAPPORT D'INSPECTION\nVEILLE RÉGLEMENTAIRE", 380, y+8, {align:'right',width:160});
+      y += 66;
+
+      doc.font('Helvetica').fontSize(8).fillColor('#555e7a').text(`Période : ${since} → ${now} · Généré le ${now} · Org : ${orgId}`, 45, y);
+      y += 20;
+
+      // Section updates critiques
+      doc.rect(45, y, W, 18).fill('#d32f2f');
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#fff').text(`ALERTES CRITIQUES & IMPORTANTES (${updates.length})`, 52, y+5);
+      y += 26;
+
+      if (updates.length === 0) {
+        doc.font('Helvetica').fontSize(9).fillColor('#555e7a').text('Aucune alerte critique ou importante sur la période.', 45, y);
+        y += 18;
+      }
+
+      for (const u of updates.slice(0, 30)) {
+        if (y > 750) { doc.addPage(); y = 40; }
+        const c = u.impact_score === 'critical' ? '#d32f2f' : '#e65100';
+        doc.rect(45, y, 5, 28).fill(c);
+        doc.font('Helvetica-Bold').fontSize(8).fillColor('#0c1120').text(`[${(u.impact_score||'').toUpperCase()}] ${u.source_name} · ${u.published_date||''}`, 55, y+2, {width:W-15});
+        doc.font('Helvetica').fontSize(7.5).fillColor('#333').text(u.title||'', 55, y+13, {width:W-15});
+        if (u.impact_action) {
+          doc.font('Helvetica').fontSize(7).fillColor('#e65100').text('→ '+u.impact_action, 55, y+23, {width:W-15});
+          y += 34;
+        } else { y += 28; }
+        doc.strokeColor('#eee').lineWidth(0.5).moveTo(45,y).lineTo(550,y).stroke();
+        y += 6;
+      }
+
+      // Section tâches
+      y += 10;
+      if (y > 700) { doc.addPage(); y = 40; }
+      doc.rect(45, y, W, 18).fill('#0c1120');
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#fff').text(`TÂCHES DE CONFORMITÉ (${tasks.length})`, 52, y+5);
+      y += 26;
+
+      if (tasks.length === 0) {
+        doc.font('Helvetica').fontSize(9).fillColor('#555e7a').text('Aucune tâche enregistrée sur la période.', 45, y);
+        y += 18;
+      }
+
+      for (const t of tasks.slice(0, 20)) {
+        if (y > 750) { doc.addPage(); y = 40; }
+        const sc = {new:'#999',read:'#4a9eff',action_required:'#e65100',done:'#2e7d32'}[t.status]||'#999';
+        doc.rect(45, y, 5, 22).fill(sc);
+        doc.font('Helvetica-Bold').fontSize(8).fillColor('#0c1120').text(t.title||'', 55, y+2, {width:W-80});
+        doc.font('Helvetica').fontSize(7).fillColor('#555e7a').text(`Statut: ${t.status||'—'} · Assigné: ${t.assigned_to||'—'} · ${t.updated_at?new Date(t.updated_at).toLocaleDateString('fr-FR'):'—'}`, 55, y+13, {width:W-15});
+        y += 28;
+      }
+
+      // Footer
+      const fh = doc.page.height - 45;
+      doc.strokeColor('#ddd').lineWidth(0.5).moveTo(45,fh).lineTo(550,fh).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor('#888').text(
+        `PharmaVeil RegIntel · Rapport d'inspection conforme GVP Module VI · Généré le ${now} · Confidentiel`,
+        45, fh+8, {align:'center',width:W}
+      );
+      doc.end();
+    });
+
+    const pdf = Buffer.concat(chunks);
+    res.set({'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="pharmaveil-regintel-report-${since}.pdf"`,'Content-Length':pdf.length});
+    return res.send(pdf);
+  } catch (err) {
+    console.error('[REGINTEL_REPORT]', err.message);
+    return res.status(500).json({ error: 'Erreur rapport', details: err.message });
+  }
+});
+
+
 
 // ═══════════════════════════════════════════════════════════════════
 //  9-B. MODULE ASSISTANT SOUMISSION — PHASE 1
