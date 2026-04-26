@@ -184,6 +184,21 @@ async function _migrateSubmissions() {
 }
 _migrateSubmissions();
 
+// ─── Migration: table trial_access (expiration 14j à la première connexion) ──
+async function _migrateTrialAccess() {
+  const db = await getDb();
+  try {
+    db.run(`CREATE TABLE IF NOT EXISTS trial_access (
+      org_id TEXT PRIMARY KEY,
+      first_login_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    )`);
+    _saveDb();
+    console.log('[MIGRATIONS] trial_access table OK');
+  } catch (err) { console.warn('[MIGRATIONS] trial_access:', err.message); }
+}
+_migrateTrialAccess();
+
 
 
 function _seedMeddra(db) {
@@ -1162,19 +1177,66 @@ const ACCESS_CODES = {
   'PV-NOVAGEN-2026':    { org_id: 'novagen',     org_name: 'Novagen South Africa',       role: 'beta' },
   'PV-BIOVAC-2026':     { org_id: 'biovac',      org_name: 'Biovac Institute',           role: 'beta' },
   'PV-ROCHE-SA-2026':   { org_id: 'roche_sa',    org_name: 'Roche South Africa',        role: 'beta' },
+  'PV-SOUAD-2026':      { org_id: 'souad',       org_name: 'Souad',                      role: 'beta' },
   'PV-ADMIN-2026':      { org_id: 'pharmaveil',  org_name: 'PharmaVeil Admin',           role: 'admin' },
 };
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { access_code } = req.body;
   if (!access_code) return res.status(400).json({ error: 'Code requis' });
   const org = ACCESS_CODES[access_code.toUpperCase()];
   if (!org) return res.status(401).json({ error: 'Code invalide' });
+
+  // Admin et demo : pas d'expiration
+  if (org.role !== 'admin' && org.role !== 'demo') {
+    try {
+      const db = await getDb();
+      const stmt = db.prepare('SELECT * FROM trial_access WHERE org_id=?');
+      const trial = stmt.getAsObject([org.org_id]);
+      stmt.free();
+
+      if (!trial.org_id) {
+        // Première connexion — enregistrer + calculer expiration 14j
+        const now = new Date();
+        const expires = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+        db.run('INSERT INTO trial_access (org_id, first_login_at, expires_at) VALUES (?,?,?)',
+          [org.org_id, now.toISOString(), expires.toISOString()]);
+        _saveDb();
+        console.log(`[TRIAL] First login: ${org.org_id} — expires ${expires.toISOString().slice(0,10)}`);
+      } else {
+        // Connexions suivantes — vérifier expiration
+        if (new Date(trial.expires_at) < new Date()) {
+          return res.status(403).json({
+            error: "Periode d'essai expiree",
+            message: "Votre acces beta de 14 jours est termine. Contactez contact@pharmaveil.eu pour continuer.",
+            expired_at: trial.expires_at,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[TRIAL] Check failed:', err.message);
+    }
+  }
+
+  // Récupérer infos trial pour la réponse
+  let trialInfo = null;
+  try {
+    const db = await getDb();
+    const s = db.prepare('SELECT * FROM trial_access WHERE org_id=?');
+    const t = s.getAsObject([org.org_id]);
+    s.free();
+    if (t.org_id) {
+      const daysLeft = Math.ceil((new Date(t.expires_at) - new Date()) / (1000 * 60 * 60 * 24));
+      trialInfo = { expires_at: t.expires_at, days_left: Math.max(0, daysLeft) };
+    }
+  } catch {}
+
   return res.json({
     success: true,
     org_id: org.org_id,
     org_name: org.org_name,
     role: org.role,
+    trial: trialInfo,
     message: `Bienvenue ${org.org_name}`,
   });
 });
