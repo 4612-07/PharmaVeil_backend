@@ -1,0 +1,38 @@
+name: RegIntel — Scraping réglementaire quotidien
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+
+  workflow_dispatch:
+    inputs:
+      hours_back:
+        description: 'Fenêtre de temps (heures)'
+        required: false
+        default: '25'
+
+jobs:
+  scrape:
+    name: Scrape & Push to Railway
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run RegIntel scraper
+        env:
+          RAILWAY_URL:      ${{ secrets.RAILWAY_URL }}
+          INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          HOURS_BACK:       ${{ github.event.inputs.hours_back || '25' }}
+        run: node scripts/regintel-scraper.js
+
+      - name: Log summary
+        if: always()
+        run: echo "✅ RegIntel scraping terminé — $(date -u '+%Y-%m-%d %H:%M UTC')"
