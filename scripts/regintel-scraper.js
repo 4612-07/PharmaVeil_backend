@@ -25,8 +25,8 @@ if (!API_KEY) {
 const SOURCES = [
   {
     code: 'EMA',
-    name: 'WHO Drug Information',
-    rss: 'https://www.who.int/feeds/entity/medicines/en/rss.xml',
+    name: 'FDA MedWatch Drug Safety Alerts',
+    rss: 'https://www.fda.gov/safety/recalls-market-withdrawals-safety-alerts/rss.xml',
     vigilance_type: 'pv',
   },
   {
