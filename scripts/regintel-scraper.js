@@ -25,8 +25,8 @@ if (!API_KEY) {
 const SOURCES = [
   {
     code: 'EMA',
-    name: 'FDA MedWatch Drug Safety Alerts',
-    rss: 'https://www.fda.gov/safety/recalls-market-withdrawals-safety-alerts/rss.xml',
+    name: 'FDA MedWatch Safety Alerts',
+    rss: 'https://www.fda.gov/AboutFDA/ContactFDA/StayInformed/RSSFeeds/MedWatch/rss.xml',
     vigilance_type: 'pv',
   },
   {
