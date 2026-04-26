@@ -25,8 +25,8 @@ if (!API_KEY) {
 const SOURCES = [
   {
     code: 'EMA',
-    name: 'European Medicines Agency — EUR-Lex',
-    rss: 'https://eur-lex.europa.eu/rss/RSS_LATEST_EURLEX.xml',
+    name: 'WHO Drug Information',
+    rss: 'https://www.who.int/feeds/entity/medicines/en/rss.xml',
     vigilance_type: 'pv',
   },
   {
