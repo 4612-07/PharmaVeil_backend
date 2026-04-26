@@ -2673,8 +2673,17 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// POST /api/regintel/submit — Soumettre manuellement un update réglementaire
-app.post('/api/regintel/submit', requireAdmin, async (req, res) => {
+// ─── API Key interne (GitHub Actions / scraper automatique) ──────────────────
+function requireAdminOrApiKey(req, res, next) {
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey && process.env.INTERNAL_API_KEY && apiKey === process.env.INTERNAL_API_KEY) {
+    return next();
+  }
+  return requireAdmin(req, res, next);
+}
+
+// POST /api/regintel/submit
+app.post('/api/regintel/submit', requireAdminOrApiKey, async (req, res) => {
   try {
     await _initRegIntelTable();
     const { title, url, content, source_code, published_date } = req.body;
