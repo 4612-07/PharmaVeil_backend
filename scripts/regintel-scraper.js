@@ -26,7 +26,7 @@ const SOURCES = [
   {
     code: 'EMA',
     name: 'European Medicines Agency',
-    rss: 'https://www.ema.europa.eu/en/rss.xml',
+    rss: 'https://www.ema.europa.eu/en/search/search/ema_news/rss',
     vigilance_type: 'pv',
   },
   {
@@ -50,7 +50,7 @@ const SOURCES = [
   {
     code: 'ANSM',
     name: 'Agence Nationale de Sécurité du Médicament',
-    rss: 'https://ansm.sante.fr/rss.xml',
+    rss: 'https://ansm.sante.fr/feed',
     vigilance_type: 'pv',
   },
 ];
