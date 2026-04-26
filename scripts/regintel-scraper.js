@@ -25,8 +25,14 @@ if (!API_KEY) {
 const SOURCES = [
   {
     code: 'EMA',
-    name: 'European Medicines Agency',
-    rss: 'https://www.ema.europa.eu/en/news/rss',
+    name: 'European Medicines Agency — EUR-Lex',
+    rss: 'https://eur-lex.europa.eu/rss/RSS_LATEST_EURLEX.xml',
+    vigilance_type: 'pv',
+  },
+  {
+    code: 'SAHPRA',
+    name: 'South African Health Products Regulatory Authority',
+    rss: 'https://www.sahpra.org.za/feed/',
     vigilance_type: 'pv',
   },
   {
